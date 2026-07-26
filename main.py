@@ -160,9 +160,7 @@ def scan_ticker(ticker):
                         stop_l = round(entry_p - (1.6 * atr), 2)
                         target_p = entry_p * 1.05
                         
-                        risk_amt = CAPITAL * RISK_PER_TRADE
-                        risk_per_share = entry_p - stop_l
-                        pos_size = int(risk_amt / risk_per_share) if risk_per_share > 0 else 0
+                        risk_pct = round(((entry_p - stop_l) / entry_p) * 100, 2)
 
                         status, days, max_r = "OPEN 🟢", "-", entry_p
                         exit_idx = i
@@ -185,8 +183,8 @@ def scan_ticker(ticker):
                             'Ticker': ticker,
                             'Entry': round(entry_p, 2),
                             'StopLoss': stop_l,
+                            'RiskPct': risk_pct,
                             'Target': round(target_p, 2),
-                            'Qty': pos_size,
                             'Score': s_today,
                             'Status': status,
                             'Days': days,
@@ -221,7 +219,7 @@ if __name__ == "__main__":
         open_trades = df[df['Status'] == "OPEN 🟢"]
         
         if not open_trades.empty:
-            msg = f"🚀 *تقرير الصفقات المفتوحة الحالية (EGX)*\n"
+            msg = f"🚀 *تقرير الصفقات الإيجابية الحالية (EGX)*\n"
             msg += f"📅 تاريخ التحديث: `{pd.Timestamp.now().strftime('%Y-%m-%d')}`\n"
             msg += f"📊 عدد الصفقات المفتوحة: `{len(open_trades)}`\n"
             msg += "-----------------------------------\n\n"
@@ -232,14 +230,14 @@ if __name__ == "__main__":
                 msg += f"💵 *سعر الدخول:* `{row['Entry']}`\n"
                 msg += f"🎯 *الهدف (5%):* `{row['Target']}`\n"
                 msg += f"🛑 *وقف الخسارة:* `{row['StopLoss']}`\n"
-                msg += f"📦 *الكمية المقترحة:* `{row['Qty']}` سهم\n"
+                msg += f"⚠️ *نسبة المخاطرة:* `{row['RiskPct']}%`\n"
                 msg += f"⭐ *السكور:* `{row['Score']}`\n"
                 msg += "-----------------------------------\n"
             
             send_telegram_message(msg)
         else:
-            no_trade_msg = f"ℹ️ *تقرير الفحص اليومي (EGX)*\n📅 `{pd.Timestamp.now().strftime('%Y-%m-%d')}`\n\nلا توجد أي صفقات مفتوحة حالياً مطابقة للشروط."
+            no_trade_msg = f"ℹ️ *تقرير الصفقات الإيجابية الحالية (EGX)*\n📅 `{pd.Timestamp.now().strftime('%Y-%m-%d')}`\n\nلا توجد أي صفقات إيجابية مفتوحة حالياً."
             send_telegram_message(no_trade_msg)
-            print("ℹ️ لا توجد صفقات مفتوحة لإرسالها.")
+            print("ℹ️ لا توجد صفقات إيجابية مفتوحة لإرسالها.")
     else:
         print("❌ لم يتم العثور على أي إشارات.")

@@ -1,0 +1,206 @@
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import talib
+from concurrent.futures import ThreadPoolExecutor
+import time
+import logging
+import sys
+import winsound  
+
+# إعدادات النظام
+if sys.platform == 'win32':
+    sys.stdout.reconfigure(encoding='utf-8')
+
+logging.getLogger('yfinance').setLevel(logging.CRITICAL)
+
+# إعدادات المحفظة لإدارة المخاطر
+CAPITAL = 100000  
+RISK_PER_TRADE = 0.01  
+
+# قائمة الأسهم المصرية
+egyptian_stocks = [
+    "FWRY.CA", "GBCO.CA", "PHDC.CA", "ORHD.CA", "ZMID.CA", "CSAG.CA",
+    "ETEL.CA", "ENGC.CA", "COSG.CA", "POUL.CA", "ISMA.CA", "RAYA.CA",
+    "MTIE.CA", "SKPC.CA", "ADRI.CA", "OIH.CA", "NEDA.CA", "SVCE.CA",
+    "EGAS.CA", "MCQE.CA", "SDTI.CA", "SPIN.CA", "NCCW.CA", "EPCO.CA",
+    "RUBX.CA", "HBCO.CA", "MFSC.CA", "DSCV.CA", "ISMQ.CA", "ARVA.CA",
+    "AIFI.CA", "ELKA.CA", "EEII.CA", "RREI.CA", "ACAMD.CA", "ELEC.CA",
+    "MPCO.CA", "ETRS.CA", "DGTZ.CA", "PRDC.CA", "AMER.CA", "MASF.CA",
+    "ELSH.CA", "RACC.CA", "OBRI.CA", "MEPA.CA", "AMIA.CA", "ODIN.CA",
+    "MENA.CA", "GDWA.CA", "ATLC.CA", "ACTF.CA", "TAQA.CA", "EDFM.CA",
+    "MILS.CA", "CEFM.CA", "WCDF.CA", "GSSC.CA", "UEFA.CA", "AFMC.CA",
+    "ANFI.CA", "TORA.CA", "AMES.CA", "SUCE.CA", "ELNA.CA", "VALL.CA",
+    "BONY.CA", "EGBE.CA", "ABUK.CA", "MFPC.CA", "AMOC.CA", "MICH.CA",
+    "ICFC.CA", "EGCH.CA", "JUFO.CA", "DOMI.CA", "AJWA.CA", "INFI.CA",
+    "ADPC.CA", "OLFI.CA", "SNFC.CA", "EFID.CA", "TMGH.CA", "SWDY.CA",
+    "SUGR.CA", "PRCL.CA", "ORWE.CA", "ORAS.CA", "OCDI.CA", "MPRC.CA",
+    "LCSW.CA", "IFAP.CA", "HRHO.CA", "EGAL.CA", "EFIH.CA", "EFIC.CA",
+    "ECAP.CA", "EAST.CA", "COMI.CA", "CCAP.CA", "BTFH.CA", "BINV.CA",
+    "ASCM.CA", "ARCC.CA", "ALUM.CA", "ALCN.CA", "AFDI.CA", "ADIB.CA",
+    "SAUD.CA", "BIOC.CA", "OCPH.CA", "MBSC.CA", "APSW.CA", "MBEC.CA",
+    "NINH.CA", "GOCC.CA", "CNFN.CA", "MIPH.CA", "MCRC.CA", "BIDI.CA",
+    "FIRE.CA", "NIPH.CA", "IDRE.CA", "MHOI.CA", "NHPS.CA", "GMCI.CA",
+    "FNAR.CA", "CPCI.CA", "ICMI.CA", "UBEE.CA", "CCRS.CA", "FAIT.CA",
+    "UPMS.CA", "EALR.CA", "AALR.CA", "WKOL.CA", "LUTS.CA", "ELWA.CA",
+    "RTVC.CA", "EXPA.CA", "CIEB.CA", "QNBE.CA", "BIGP.CA", "EASB.CA",
+    "ROTO.CA", "DTPP.CA", "GIHD.CA", "EBSE.CA", "IBCT.CA", "CANA.CA",
+    "EBSC.CA", "ADCI.CA", "PHTV.CA", "SEIG.CA", "MOSC.CA", "GTW.CA",
+    "PHGC.CA", "PRMH.CA", "RKAZ.CA", "CAED.CA", "INEG.CA", "RMDA.CA",
+    "SCTS.CA", "EGTS.CA", "ATQA.CA", "ICID.CA", "UNIP.CA", "CICH.CA",
+    "RAKT.CA", "HDBK.CA", "KWIN.CA", "SMFR.CA", "NARE.CA", "GRCA.CA",
+    "EPPK.CA", "EHDR.CA", "VERT.CA", "UNIT.CA", "MAAL.CA", "CLHO.CA",
+    "FTNS.CA", "TALM.CA", "SIPC.CA", "MPCI.CA", "PHAR.CA", "HELI.CA",
+    "KABO.CA", "IRON.CA", "EGS3.CA", "SCFM.CA", "MOIN.CA", "GGCC.CA",
+    "ARAB.CA", "COPR.CA", "CERA.CA", "OFH.CA", "AIH.CA", "AREH.CA",
+    "UEGC.CA", "MOED.CA", "SPMD.CA", "KZPC.CA", "ISPH.CA", "ACGC.CA",
+    "IEEC.CA", "ZEOT.CA", "SCEM.CA", "ACRO.CA", "DAPH.CA", "ACAP.CA",
+    "TANM.CA", "EMFD.CA", "AMPI.CA", "KRDI.CA", "ASPI.CA", "EIUD.CA",
+    "CRST.CA", "CIRA.CA", "GGRN.CA", "VLMR.CA", "AIDC.CA"
+]
+
+def scan_ticker(ticker):
+    try:
+        # بيانات 10 سنوات
+        data_daily = yf.download(ticker, period="10y", interval="1d", progress=False, threads=False)
+        if data_daily.empty or len(data_daily) < 100: return None
+        if isinstance(data_daily.columns, pd.MultiIndex): data_daily.columns = data_daily.columns.get_level_values(0)
+
+        logic = {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}
+        data_weekly = data_daily.resample('W').apply(logic).dropna()
+        w_rsi = talib.RSI(data_weekly['Close'], 14)
+        w_ma50 = talib.SMA(data_weekly['Close'], 50)
+
+        close = data_daily['Close'].ffill()
+        high = data_daily['High'].ffill()
+        low = data_daily['Low'].ffill()
+        open_p = data_daily['Open'].ffill()
+        volume = data_daily['Volume'].ffill()
+
+        rsi = talib.RSI(close, 14)
+        macd_l, macd_s, _ = talib.MACD(close, 6, 13, 5)
+        adx = talib.ADX(high, low, close, 14)
+        ema5 = talib.EMA(close, 5)
+        mfi = talib.MFI(high, low, close, volume, 14)
+        v_ma10 = volume.rolling(10).mean()
+        
+        ma50_d = close.rolling(50).mean()
+        ema9_d = close.ewm(span=9, adjust=False).mean()
+        ma20_d = close.rolling(20).mean()
+        high_10_d = high.shift(1).rolling(window=10).max()
+        slope_d = close.rolling(20).apply(lambda x: np.polyfit(range(len(x)), x, 1)[0], raw=True)
+
+        k_sig = (close > (talib.SMA(close, 10) + talib.TRANGE(high, low, close) * 1.5)).astype(int)
+        a_sig = ((close > talib.SMA(close, 8)) & (close > talib.SMA(close, 5))).astype(int)
+        sig_count = k_sig + a_sig + ((close - close.shift(7)) > 0).astype(int) + (volume > v_ma10).astype(int)
+
+        def get_strength_score(idx):
+            score = 0.0
+            if (macd_l.iloc[idx] - macd_s.iloc[idx]) > 0: score += 2.0
+            if close.iloc[idx] > ema5.iloc[idx]: score += 1.0
+            if 42 <= rsi.iloc[idx] <= 65: score += 2.0
+            if sig_count.iloc[idx] >= 3: score += 2.0
+            if mfi.iloc[idx] >= 50: score += 1.0
+            if volume.iloc[idx] > (v_ma10.iloc[idx] * 1.25): score += 1.0
+            return score
+
+        signals = []
+        last_success_exit_date = None
+        i = 80 
+        while i < len(data_daily):
+            curr_date = data_daily.index[i]
+            if last_success_exit_date is not None:
+                if (curr_date - last_success_exit_date).days < 14:
+                    i += 1
+                    continue
+
+            try:
+                last_w_date = data_weekly.index[data_weekly.index <= curr_date][-1]
+                is_weekly_strong = (close.iloc[i] > w_ma50.loc[last_w_date]) and (w_rsi.loc[last_w_date] >= 50)
+            except: is_weekly_strong = False
+
+            if is_weekly_strong:
+                s_today = get_strength_score(i)
+                s_yesterday = get_strength_score(i-1)
+                candle_range = high.iloc[i] - low.iloc[i]
+                candle_body = abs(close.iloc[i] - open_p.iloc[i])
+                is_quality = candle_body > (candle_range * 0.6) if candle_range > 0 else False
+
+                if (close.iloc[i] > open_p.iloc[i]) and (s_today >= 7.0) and (s_yesterday < 6.0) and is_quality:
+                    if all([close.iloc[i] > ma50_d.iloc[i], ema9_d.iloc[i] > ma20_d.iloc[i], 
+                            close.iloc[i] > high_10_d.iloc[i], adx.iloc[i] > 25, slope_d.iloc[i] > 0]):
+                        
+                        entry_p = float(close.iloc[i])
+                        atr = talib.TRANGE(high, low, close).rolling(14).mean().iloc[i]
+                        stop_l = round(entry_p - (1.6 * atr), 2)
+                        target_p = entry_p * 1.05
+                        
+                        risk_amt = CAPITAL * RISK_PER_TRADE
+                        risk_per_share = entry_p - stop_l
+                        pos_size = int(risk_amt / risk_per_share) if risk_per_share > 0 else 0
+
+                        status, days, max_r = "OPEN 🟢", "-", entry_p
+                        exit_idx = i
+                        for j in range(i + 1, len(data_daily)):
+                            max_r = max(max_r, high.iloc[j])
+                            if high.iloc[j] >= target_p:
+                                status, days = "CLOSED (5% Target) 🛡️", j - i
+                                last_success_exit_date = data_daily.index[j]
+                                exit_idx = j
+                                break
+                            if low.iloc[j] <= stop_l:
+                                status, days = "STOP LOSS ❌", j - i
+                                last_success_exit_date = None
+                                exit_idx = j
+                                break
+                            exit_idx = j
+
+                        signals.append({
+                            'Date': curr_date.strftime('%Y-%m-%d'),
+                            'Ticker': ticker,
+                            'Entry': round(entry_p, 2),
+                            'StopLoss': stop_l,
+                            'Qty': pos_size,
+                            'Score': s_today,
+                            'Status': status,
+                            'Days': days,
+                            'MaxReach': round(max_r, 2)
+                        })
+                        i = exit_idx
+            i += 1
+        return signals
+    except: return None
+
+if __name__ == "__main__":
+    report_file = "Backtest_EGX_10Years_5Loops.xlsx"
+    print(f"🚀 بدء الفحص لـ 5 دورات (بيانات 10 سنوات لكل دورة)...")
+    
+    all_signals = []
+    
+    # تنفيذ 5 دورات فحص
+    for loop in range(1, 6):
+        print(f"📡 دورة {loop}/5 جارِ فحص {len(egyptian_stocks)} سهم...")
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            results = list(executor.map(scan_ticker, egyptian_stocks))
+        
+        for res in results:
+            if res: all_signals.extend(res)
+
+    if all_signals:
+        # إزالة التكرار لضمان أن الصفقات فريدة
+        df = pd.DataFrame(all_signals).drop_duplicates(subset=['Date', 'Ticker'])
+        df = df.sort_values(by='Date', ascending=False)
+        
+        closed = df[df['Status'] != "OPEN 🟢"]
+        win_rate = (len(closed[closed['Status'].str.contains("Target")]) / len(closed) * 100) if not closed.empty else 0
+        
+        print("\n" + "═"*45)
+        print(f"📊 إجمالي الصفقات الفريدة (10 سنوات): {len(df)}")
+        print(f"🎯 نسبة النجاح الكلية: {win_rate:.2f}%")
+        print(f"💾 تم حفظ الملف: {report_file}")
+        print("═"*45)
+        
+        df.to_excel(report_file, index=False)
+        winsound.Beep(800, 500)
+    else:
+        print("❌ لم يتم العثور على إشارات.")

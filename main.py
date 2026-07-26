@@ -1,14 +1,15 @@
+import os
+import sys
+import time
+import logging
+import requests
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import talib
 from concurrent.futures import ThreadPoolExecutor
-import time
-import logging
-import sys
-import winsound  
 
-# إعدادات النظام
+# إعدادات النظام للتوافق مع UTF-8
 if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8')
 
@@ -17,6 +18,31 @@ logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 # إعدادات المحفظة لإدارة المخاطر
 CAPITAL = 100000  
 RISK_PER_TRADE = 0.01  
+
+# جلب بيانات التليجرام من البيئة (Secrets)
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
+def send_telegram_message(message):
+    """دالة لإرسال الرسائل عبر بوت التليجرام"""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ لم يتم العثور على TELEGRAM_BOT_TOKEN أو TELEGRAM_CHAT_ID في الإعدادات.")
+        return
+    
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code == 200:
+            print("✅ تم إرسال الإشعار بنجاح إلى التليجرام.")
+        else:
+            print(f"❌ فشل إرسال الإشعار: {response.text}")
+    except Exception as e:
+        print(f"❌ خطأ أثناء الاتصال بالتليجرام: {e}")
 
 # قائمة الأسهم المصرية
 egyptian_stocks = [
@@ -61,7 +87,6 @@ egyptian_stocks = [
 
 def scan_ticker(ticker):
     try:
-        # بيانات 10 سنوات
         data_daily = yf.download(ticker, period="10y", interval="1d", progress=False, threads=False)
         if data_daily.empty or len(data_daily) < 100: return None
         if isinstance(data_daily.columns, pd.MultiIndex): data_daily.columns = data_daily.columns.get_level_values(0)
@@ -160,6 +185,7 @@ def scan_ticker(ticker):
                             'Ticker': ticker,
                             'Entry': round(entry_p, 2),
                             'StopLoss': stop_l,
+                            'Target': round(target_p, 2),
                             'Qty': pos_size,
                             'Score': s_today,
                             'Status': status,
@@ -172,35 +198,48 @@ def scan_ticker(ticker):
     except: return None
 
 if __name__ == "__main__":
-    report_file = "Backtest_EGX_10Years_5Loops.xlsx"
-    print(f"🚀 بدء الفحص لـ 5 دورات (بيانات 10 سنوات لكل دورة)...")
+    report_file = "Backtest_EGX_10Years.xlsx"
+    print(f"🚀 بدء الفحص الشامل للأسهم المصرية...")
     
     all_signals = []
     
-    # تنفيذ 5 دورات فحص
-    for loop in range(1, 6):
-        print(f"📡 دورة {loop}/5 جارِ فحص {len(egyptian_stocks)} سهم...")
-        with ThreadPoolExecutor(max_workers=20) as executor:
-            results = list(executor.map(scan_ticker, egyptian_stocks))
-        
-        for res in results:
-            if res: all_signals.extend(res)
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        results = list(executor.map(scan_ticker, egyptian_stocks))
+    
+    for res in results:
+        if res: all_signals.extend(res)
 
     if all_signals:
-        # إزالة التكرار لضمان أن الصفقات فريدة
         df = pd.DataFrame(all_signals).drop_duplicates(subset=['Date', 'Ticker'])
         df = df.sort_values(by='Date', ascending=False)
         
-        closed = df[df['Status'] != "OPEN 🟢"]
-        win_rate = (len(closed[closed['Status'].str.contains("Target")]) / len(closed) * 100) if not closed.empty else 0
-        
-        print("\n" + "═"*45)
-        print(f"📊 إجمالي الصفقات الفريدة (10 سنوات): {len(df)}")
-        print(f"🎯 نسبة النجاح الكلية: {win_rate:.2f}%")
-        print(f"💾 تم حفظ الملف: {report_file}")
-        print("═"*45)
-        
+        # حفظ التقرير الكامل في ملف Excel
         df.to_excel(report_file, index=False)
-        winsound.Beep(800, 500)
+        print(f"💾 تم حفظ الملف الكامل: {report_file}")
+        
+        # تصفية الصفقات المفتوحة فقط
+        open_trades = df[df['Status'] == "OPEN 🟢"]
+        
+        if not open_trades.empty:
+            msg = f"🚀 *تقرير الصفقات المفتوحة الحالية (EGX)*\n"
+            msg += f"📅 تاريخ التحديث: `{pd.Timestamp.now().strftime('%Y-%m-%d')}`\n"
+            msg += f"📊 عدد الصفقات المفتوحة: `{len(open_trades)}`\n"
+            msg += "-----------------------------------\n\n"
+            
+            for _, row in open_trades.iterrows():
+                msg += f"📌 *السهم:* `{row['Ticker']}`\n"
+                msg += f"📅 *تاريخ الإشارة:* `{row['Date']}`\n"
+                msg += f"💵 *سعر الدخول:* `{row['Entry']}`\n"
+                msg += f"🎯 *الهدف (5%):* `{row['Target']}`\n"
+                msg += f"🛑 *وقف الخسارة:* `{row['StopLoss']}`\n"
+                msg += f"📦 *الكمية المقترحة:* `{row['Qty']}` سهم\n"
+                msg += f"⭐ *السكور:* `{row['Score']}`\n"
+                msg += "-----------------------------------\n"
+            
+            send_telegram_message(msg)
+        else:
+            no_trade_msg = f"ℹ️ *تقرير الفحص اليومي (EGX)*\n📅 `{pd.Timestamp.now().strftime('%Y-%m-%d')}`\n\nلا توجد أي صفقات مفتوحة حالياً مطابقة للشروط."
+            send_telegram_message(no_trade_msg)
+            print("ℹ️ لا توجد صفقات مفتوحة لإرسالها.")
     else:
-        print("❌ لم يتم العثور على إشارات.")
+        print("❌ لم يتم العثور على أي إشارات.")

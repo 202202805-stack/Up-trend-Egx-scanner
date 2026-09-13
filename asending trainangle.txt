@@ -1,0 +1,941 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+#  EGX ASCENDING TRIANGLE SCANNER WITH TRADINGVIEW LIVE DATA & OPEN POSITIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+!pip install -q yfinance scipy pandas numpy matplotlib tqdm openpyxl requests
+
+import os
+import sys
+import time
+import warnings
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Dict, List, Optional, Tuple
+
+from google.colab import files
+import numpy as np
+import openpyxl
+from openpyxl.styles import Alignment, Font, PatternFill
+import pandas as pd
+import requests
+from scipy import stats
+from tqdm.notebook import tqdm
+import yfinance as yf
+
+warnings.filterwarnings("ignore")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 1. CONFIGURATION & THRESHOLDS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class Strictness(Enum):
+  LENIENT = "lenient"
+  BALANCED = "balanced"
+  STRICT = "strict"
+
+
+@dataclass
+class DetectorConfig:
+  pivot_lookback: int = 3
+  min_pivot_touches: int = 2
+  ideal_pivot_touches: int = 3
+  resistance_tolerance: float = 0.008
+  max_resistance_slope: float = 0.002
+  min_resistance_r2: float = 0.70
+  min_support_slope: float = 0.0001
+  min_support_r2: float = 0.50
+  min_pattern_candles: int = 15
+  max_pattern_candles: int = 120
+  breakout_position_min: float = 0.55
+  breakout_position_max: float = 0.80
+  ideal_breakout_pct: float = 0.64
+  max_inside_violations: float = 0.10
+  volume_contraction_required: bool = True
+  min_volume_spike_ratio: float = 1.3
+  ideal_volume_spike: float = 2.0
+  weight_structure: float = 0.35
+  weight_volume: float = 0.35
+  weight_breakout: float = 0.30
+  strictness: Strictness = Strictness.BALANCED
+  allow_premature_breakout: bool = False
+  allow_failed_pattern: bool = True
+
+  def apply_strictness(self):
+    if self.strictness == Strictness.LENIENT:
+      self.min_pivot_touches = 2
+      self.resistance_tolerance = 0.015
+      self.max_resistance_slope = 0.005
+      self.min_support_r2 = 0.40
+      self.breakout_position_min = 0.40
+      self.breakout_position_max = 0.90
+      self.min_volume_spike_ratio = 1.1
+    elif self.strictness == Strictness.STRICT:
+      self.min_pivot_touches = 3
+      self.resistance_tolerance = 0.005
+      self.max_resistance_slope = 0.001
+      self.min_support_r2 = 0.75
+      self.breakout_position_min = 0.60
+      self.breakout_position_max = 0.75
+      self.min_volume_spike_ratio = 1.8
+      self.ideal_pivot_touches = 4
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 2. DATA STRUCTURES & TRADINGVIEW INTEGRATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class PivotPoint:
+  idx: int
+  price: float
+  pivot_type: str
+
+
+@dataclass
+class TrendLine:
+  slope: float
+  intercept: float
+  r2: float
+  touches: List[PivotPoint]
+  line_type: str
+
+  def value_at(self, idx: float) -> float:
+    return self.slope * idx + self.intercept
+
+
+@dataclass
+class TrianglePattern:
+  detected: bool = False
+  ticker: str = ""
+  resistance: Optional[TrendLine] = None
+  support: Optional[TrendLine] = None
+  start_idx: int = -1
+  end_idx: int = -1
+  breakout_idx: int = -1
+  apex_idx: float = -1.0
+  start_date: str = ""
+  breakout_date: str = ""
+  exit_date: str = ""
+  pnl_pct: float = 0.0
+  status: str = "Open"  # Win, Loss, Open
+  structure_score: float = 0.0
+  volume_score: float = 0.0
+  breakout_score: float = 0.0
+  composite_score: float = 0.0
+  volume_confirmed: bool = False
+
+
+def fetch_tradingview_live_data() -> Dict[str, Dict[str, Any]]:
+  """سحب أسعار اليوم اللحظية من TradingView وتجهيزها للدمج"""
+  url = "https://scanner.tradingview.com/egypt/scan"
+  payload = {
+      "filter": [{"left": "name", "operation": "nempty"}],
+      "options": {"active_symbols_only": True},
+      "columns": ["name", "open", "high", "low", "close", "volume"],
+      "sort": {"sortBy": "name", "sortOrder": "asc"},
+      "range": [0, 300],
+  }
+  headers = {"User-Agent": "Mozilla/5.0"}
+
+  tv_dict = {}
+  try:
+    res = requests.post(url, json=payload, headers=headers, timeout=10)
+    data = res.json().get("data", [])
+    for item in data:
+      sym = item["s"].replace("EGX:", "")
+      d = item["d"]
+      open_p = d[1] if d[1] is not None else 0
+      high_p = d[2] if d[2] is not None else open_p
+      low_p = d[3] if d[3] is not None else open_p
+      close_p = d[4] if d[4] is not None else open_p
+      vol = d[5] if d[5] is not None else 0
+
+      tv_dict[f"{sym}.CA"] = {
+          "open": float(open_p),
+          "high": float(high_p),
+          "low": float(low_p),
+          "close": float(close_p),
+          "volume": float(vol),
+      }
+  except Exception as e:
+    print(
+        f"⚠️ تعذر سحب أسعار TradingView اللحظية، سيتم الاعتماد على Yahoo"
+        f" Finance فقط: {e}"
+    )
+  return tv_dict
+
+
+def merge_tv_live_row(
+    df: pd.DataFrame, ticker: str, tv_dict: Dict[str, Dict[str, Any]]
+) -> pd.DataFrame:
+  """دمج شمعة TradingView اللحظية مع بيانات Yahoo Finance"""
+  if ticker not in tv_dict:
+    return df
+
+  live_data = tv_dict[ticker]
+  today_date = pd.Timestamp.now().floor("D")
+
+  if not df.empty and df.index[-1].strftime("%Y-%m-%d") == today_date.strftime(
+      "%Y-%m-%d"
+  ):
+    df.iloc[-1] = [
+        live_data["open"],
+        live_data["high"],
+        live_data["low"],
+        live_data["close"],
+        live_data["volume"],
+    ]
+  else:
+    new_row = pd.DataFrame([live_data], index=[today_date])
+    df = pd.concat([df, new_row])
+  return df
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 3. DETECTION ENGINE WITH OPEN POSITION SIMULATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class AscendingTriangleEngine:
+
+  def __init__(self, config: Optional[DetectorConfig] = None):
+    self.cfg = config or DetectorConfig()
+    self.cfg.apply_strictness()
+
+  def find_pivots(
+      self, df: pd.DataFrame
+  ) -> Tuple[List[PivotPoint], List[PivotPoint]]:
+    n = self.cfg.pivot_lookback
+    highs = df["high"].values
+    lows = df["low"].values
+    ph, pl = [], []
+
+    for i in range(n, len(df) - n):
+      h_window = highs[i - n : i + n + 1]
+      if highs[i] == max(h_window) and highs[i] > max(np.delete(h_window, n)):
+        ph.append(PivotPoint(idx=i, price=highs[i], pivot_type="high"))
+
+      l_window = lows[i - n : i + n + 1]
+      if lows[i] == min(l_window) and lows[i] < min(np.delete(l_window, n)):
+        pl.append(PivotPoint(idx=i, price=lows[i], pivot_type="low"))
+
+    return ph, pl
+
+  def _fit_resistance(self, pivots: List[PivotPoint]) -> Optional[TrendLine]:
+    if len(pivots) < self.cfg.min_pivot_touches:
+      return None
+    x = np.array([p.idx for p in pivots], dtype=float)
+    y = np.array([p.price for p in pivots], dtype=float)
+
+    if np.allclose(y, y[0], rtol=1e-10):
+      return TrendLine(
+          slope=0.0,
+          intercept=y[0],
+          r2=1.0,
+          touches=pivots,
+          line_type="resistance",
+      )
+
+    slope, intercept, r_value, _, _ = stats.linregress(x, y)
+    r2 = r_value**2
+
+    if abs(slope) > self.cfg.max_resistance_slope:
+      return None
+    avg_y = np.mean(y)
+    if any(
+        abs(p.price - avg_y) / avg_y > self.cfg.resistance_tolerance
+        for p in pivots
+    ):
+      return None
+
+    return TrendLine(
+        slope=slope,
+        intercept=intercept,
+        r2=r2,
+        touches=pivots,
+        line_type="resistance",
+    )
+
+  def _fit_support(self, pivots: List[PivotPoint]) -> Optional[TrendLine]:
+    if len(pivots) < 2:
+      return None
+    prices = [p.price for p in pivots]
+    indices = [p.idx for p in pivots]
+
+    slope, intercept, r_value, _, _ = stats.linregress(indices, prices)
+    r2 = r_value**2
+
+    if slope < self.cfg.min_support_slope or r2 < self.cfg.min_support_r2:
+      return None
+
+    return TrendLine(
+        slope=slope,
+        intercept=intercept,
+        r2=r2,
+        touches=pivots,
+        line_type="support",
+    )
+
+  def _check_structure(
+      self,
+      df: pd.DataFrame,
+      resistance: TrendLine,
+      support: TrendLine,
+      start_idx: int,
+  ) -> Optional[Dict[str, Any]]:
+    m_r, b_r = resistance.slope, resistance.intercept
+    m_s, b_s = support.slope, support.intercept
+
+    if abs(m_r - m_s) < 1e-12:
+      return None
+
+    apex_x = (b_s - b_r) / (m_r - m_s)
+    apex_idx = int(round(apex_x))
+
+    triangle_length = apex_x - start_idx
+    if triangle_length <= 0 or triangle_length > self.cfg.max_pattern_candles:
+      return None
+
+    breakout_idx = None
+    for i in range(start_idx, min(apex_idx + 10, len(df))):
+      res_at_i = resistance.value_at(i)
+      if df["close"].iloc[i] > res_at_i:
+        breakout_idx = i
+        break
+
+    if breakout_idx is None:
+      return None
+
+    violations = 0
+    for i in range(start_idx, breakout_idx):
+      res_at_i = resistance.value_at(i)
+      sup_at_i = support.value_at(i)
+      close, high, low = (
+          df["close"].iloc[i],
+          df["high"].iloc[i],
+          df["low"].iloc[i],
+      )
+
+      body_violates = close > res_at_i or close < sup_at_i
+      wick_violates = high > res_at_i * 1.02 or low < sup_at_i * 0.98
+
+      if body_violates or wick_violates:
+        violations += 1
+
+    violation_rate = violations / max(1, breakout_idx - start_idx)
+    if violation_rate > self.cfg.max_inside_violations:
+      return None
+
+    breakout_pct = (breakout_idx - start_idx) / triangle_length
+    is_premature = False
+    if breakout_pct < self.cfg.breakout_position_min:
+      if self.cfg.allow_premature_breakout:
+        is_premature = True
+      else:
+        return None
+
+    if breakout_pct > self.cfg.breakout_position_max:
+      return None
+
+    return {
+        "apex_idx": apex_idx,
+        "breakout_idx": breakout_idx,
+        "breakout_pct": breakout_pct,
+        "violation_rate": violation_rate,
+        "is_premature": is_premature,
+    }
+
+  def _check_volume(
+      self, df: pd.DataFrame, start_idx: int, breakout_idx: int
+  ) -> Tuple[bool, float]:
+    if "volume" not in df.columns:
+      return True, 0.5
+    vol_formation = (
+        df["volume"].iloc[start_idx:breakout_idx].values.astype(float)
+    )
+    if len(vol_formation) < 5:
+      return False, 0.0
+
+    vol_slope, _, _, _, _ = stats.linregress(
+        np.arange(len(vol_formation)), vol_formation
+    )
+    contracting = vol_slope < 0
+    avg_vol = np.mean(vol_formation)
+    breakout_vol = df["volume"].iloc[breakout_idx]
+    spike_ratio = breakout_vol / max(avg_vol, 1)
+
+    confirmed = spike_ratio >= self.cfg.min_volume_spike_ratio
+    if self.cfg.volume_contraction_required and not contracting:
+      confirmed = False
+
+    return confirmed, spike_ratio
+
+  def _simulate_trade(
+      self, df: pd.DataFrame, breakout_idx: int
+  ) -> Tuple[str, str, float]:
+    """محاكاة تداول الصفقة لتحديد تاريخ الخروج، حالة الصفقة (Win/Loss/Open)، والنسبة المئوية للربح/الخسارة"""
+    entry_price = df["close"].iloc[breakout_idx]
+    target_price = entry_price * 1.08  # هدف 8%
+    stop_loss = entry_price * 0.95  # وقف خسارة 5%
+
+    future_df = df.iloc[breakout_idx + 1 :]
+
+    for i in range(len(future_df)):
+      row = future_df.iloc[i]
+      curr_date = str(future_df.index[i]).split(" ")[0]
+
+      if row["high"] >= target_price:
+        pnl = ((target_price - entry_price) / entry_price) * 100
+        return curr_date, "Win", round(pnl, 2)
+
+      if row["low"] <= stop_loss:
+        pnl = ((stop_loss - entry_price) / entry_price) * 100
+        return curr_date, "Loss", round(pnl, 2)
+
+    # إذا استمرت حتى آخر شمعة تكون صفقات مفتوحة Open Position
+    last_close = df["close"].iloc[-1]
+    unrealized_pnl = ((last_close - entry_price) / entry_price) * 100
+    return "Open Position", "Open", round(unrealized_pnl, 2)
+
+  def _score_pattern(
+      self,
+      resistance: TrendLine,
+      support: TrendLine,
+      struct: Dict[str, Any],
+      vol_confirmed: bool,
+      vol_spike: float,
+  ) -> Tuple[float, float, float, float]:
+    touch_bonus = min(
+        1.0, len(resistance.touches) / self.cfg.ideal_pivot_touches
+    )
+    violation_penalty = max(0, 1.0 - struct["violation_rate"] * 5)
+    structure_score = (
+        0.30 * touch_bonus
+        + 0.25 * resistance.r2
+        + 0.25 * support.r2
+        + 0.20 * violation_penalty
+    )
+
+    volume_score = (
+        (0.6 + 0.4 * min(1.0, vol_spike / self.cfg.ideal_volume_spike))
+        if vol_confirmed
+        else 0.3
+    )
+
+    deviation = abs(struct["breakout_pct"] - self.cfg.ideal_breakout_pct) / 0.15
+    breakout_score = max(0, 1.0 - deviation)
+    if struct["is_premature"]:
+      breakout_score *= 0.5
+
+    composite = (
+        self.cfg.weight_structure * structure_score
+        + self.cfg.weight_volume * volume_score
+        + self.cfg.weight_breakout * breakout_score
+    )
+
+    return structure_score, volume_score, breakout_score, composite
+
+  def detect(
+      self, df: pd.DataFrame, ticker: str = ""
+  ) -> List[TrianglePattern]:
+    if len(df) < self.cfg.min_pattern_candles:
+      return []
+
+    ph_all, pl_all = self.find_pivots(df)
+    patterns = []
+
+    for i in range(len(ph_all) - 1):
+      for j in range(i + 1, len(ph_all)):
+        ph_window = ph_all[i : j + 1]
+        if len(ph_window) < self.cfg.min_pivot_touches:
+          continue
+
+        resistance = self._fit_resistance(ph_window)
+        if resistance is None:
+          continue
+
+        start_idx = ph_window[0].idx
+        pl_window = [
+            p for p in pl_all if start_idx < p.idx < ph_window[-1].idx
+        ]
+        if len(pl_window) < 2:
+          continue
+
+        support = self._fit_support(pl_window)
+        if support is None:
+          continue
+
+        struct = self._check_structure(df, resistance, support, start_idx)
+        if struct is None:
+          continue
+
+        vol_confirmed, vol_spike = self._check_volume(
+            df, start_idx, struct["breakout_idx"]
+        )
+        s_score, v_score, b_score, composite = self._score_pattern(
+            resistance, support, struct, vol_confirmed, vol_spike
+        )
+
+        bo_idx = min(struct["breakout_idx"], len(df) - 1)
+        entry_date = str(df.index[bo_idx]).split(" ")[0]
+        exit_date, status, pnl_pct = self._simulate_trade(df, bo_idx)
+
+        pattern = TrianglePattern(
+            detected=True,
+            ticker=ticker,
+            resistance=resistance,
+            support=support,
+            start_idx=start_idx,
+            end_idx=struct["apex_idx"],
+            breakout_idx=bo_idx,
+            apex_idx=struct["apex_idx"],
+            start_date=str(df.index[start_idx]).split(" ")[0],
+            breakout_date=entry_date,
+            exit_date=exit_date,
+            pnl_pct=pnl_pct,
+            status=status,
+            structure_score=s_score,
+            volume_score=v_score,
+            breakout_score=b_score,
+            composite_score=composite,
+            volume_confirmed=vol_confirmed,
+        )
+        patterns.append(pattern)
+
+    patterns.sort(key=lambda p: p.composite_score, reverse=True)
+    return patterns
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 4. PARALLEL EXECUTION & PROCESSOR
+# ═══════════════════════════════════════════════════════════════════════════════
+
+tickers = [
+    "AALR.CA",
+    "ABUK.CA",
+    "ACAMD.CA",
+    "ACAP.CA",
+    "ACGC.CA",
+    "ACTF.CA",
+    "ADCI.CA",
+    "ADIB.CA",
+    "ADPC.CA",
+    "ADRI.CA",
+    "AFDI.CA",
+    "AFMC.CA",
+    "AIDC.CA",
+    "AIFI.CA",
+    "AIH.CA",
+    "AJWA.CA",
+    "ALCN.CA",
+    "ALEX.CA",
+    "ALUM.CA",
+    "AMER.CA",
+    "AMES.CA",
+    "AMIA.CA",
+    "AMII.CA",
+    "AMOC.CA",
+    "AMPI.CA",
+    "APSW.CA",
+    "ARAB.CA",
+    "ARCC.CA",
+    "AREH.CA",
+    "ASCM.CA",
+    "ASPI.CA",
+    "ATLC.CA",
+    "ATQA.CA",
+    "AXPH.CA",
+    "BIDI.CA",
+    "BIGP.CA",
+    "BINV.CA",
+    "BIOC.CA",
+    "BONY.CA",
+    "BTFH.CA",
+    "CAED.CA",
+    "CANA.CA",
+    "CCAP.CA",
+    "CCRS.CA",
+    "CEFM.CA",
+    "CERA.CA",
+    "CFGH.CA",
+    "CICH.CA",
+    "CIEB.CA",
+    "CIRA.CA",
+    "CLHO.CA",
+    "CNFN.CA",
+    "COMI.CA",
+    "COPR.CA",
+    "COSG.CA",
+    "CPCI.CA",
+    "CPME.CA",
+    "CRST.CA",
+    "CSAG.CA",
+    "DAPH.CA",
+    "DCRC.CA",
+    "DEIN.CA",
+    "DGTZ.CA",
+    "DOMT.CA",
+    "DSCW.CA",
+    "DTPP.CA",
+    "EALR.CA",
+    "EASB.CA",
+    "EAST.CA",
+    "EBSC.CA",
+    "ECAP.CA",
+    "EDFM.CA",
+    "EEII.CA",
+    "EFIC.CA",
+    "EFID.CA",
+    "EFIH.CA",
+    "EGAL.CA",
+    "EGAS.CA",
+    "EGBE.CA",
+    "EGCH.CA",
+    "EGREF.CA",
+    "EGSA.CA",
+    "EGTS.CA",
+    "EHDR.CA",
+    "ELAB.CA",
+    "ELEC.CA",
+    "ELKA.CA",
+    "ELNA.CA",
+    "ELSH.CA",
+    "ELWA.CA",
+    "EMFD.CA",
+    "ENGC.CA",
+    "EOSB.CA",
+    "EPCO.CA",
+    "EPPK.CA",
+    "ETEL.CA",
+    "ETRS.CA",
+    "EXPA.CA",
+    "FAIT.CA",
+    "FAITA.CA",
+    "FCMD.CA",
+    "FIRE.CA",
+    "FNAR.CA",
+    "FTNS.CA",
+    "FWRY.CA",
+    "GBCO.CA",
+    "GDWA.CA",
+    "GGCC.CA",
+    "GGRN.CA",
+    "GIHD.CA",
+    "GMCI.CA",
+    "GOUR.CA",
+    "GPIM.CA",
+    "GRCA.CA",
+    "GSSC.CA",
+    "GTEX.CA",
+    "GTHE.CA",
+    "GTWL.CA",
+    "HBCO.CA",
+    "HDBK.CA",
+    "HELI.CA",
+    "HRHO.CA",
+    "IBCT.CA",
+    "ICFC.CA",
+    "ICID.CA",
+    "IDRE.CA",
+    "IEEC.CA",
+    "IFAP.CA",
+    "INEG.CA",
+    "INFI.CA",
+    "IRON.CA",
+    "ISMA.CA",
+    "ISMQ.CA",
+    "ISPH.CA",
+    "JUFO.CA",
+    "KABO.CA",
+    "KORA.CA",
+    "KRDI.CA",
+    "KWIN.CA",
+    "KZPC.CA",
+    "LCSW.CA",
+    "LKGP.CA",
+    "LUTS.CA",
+    "MAAL.CA",
+    "MASR.CA",
+    "MBEG.CA",
+    "MBSC.CA",
+    "MCQE.CA",
+    "MCRO.CA",
+    "MENA.CA",
+    "MEPA.CA",
+    "MFPC.CA",
+    "MFSC.CA",
+    "MHOT.CA",
+    "MICH.CA",
+    "MILS.CA",
+    "MIPH.CA",
+    "MOED.CA",
+    "MOIL.CA",
+    "MOIN.CA",
+    "MOSC.CA",
+    "MPCI.CA",
+    "MPCO.CA",
+    "MPRC.CA",
+    "MTIE.CA",
+    "NAHO.CA",
+    "NARE.CA",
+    "NCCW.CA",
+    "NCGC.CA",
+    "NEDA.CA",
+    "NHPS.CA",
+    "NINH.CA",
+    "NIPH.CA",
+    "OBRI.CA",
+    "OCAP.CA",
+    "OCDI.CA",
+    "OCPH.CA",
+    "ODIN.CA",
+    "OFH.CA",
+    "OIH.CA",
+    "OLFI.CA",
+    "ORAS.CA",
+    "ORHD.CA",
+    "ORWE.CA",
+    "PHAR.CA",
+    "PHDC.CA",
+    "PHGC.CA",
+    "PHTV.CA",
+    "POUL.CA",
+    "PRCL.CA",
+    "PRDC.CA",
+    "PRMH.CA",
+    "QNBE.CA",
+    "RACC.CA",
+    "RAKT.CA",
+    "RAYA.CA",
+    "RKAZ.CA",
+    "RMDA.CA",
+    "RMTV.CA",
+    "ROTO.CA",
+    "RREI.CA",
+    "RTVC.CA",
+    "RUBX.CA",
+    "SAUD.CA",
+    "SCEM.CA",
+    "SCFM.CA",
+    "SCTS.CA",
+    "SDTI.CA",
+    "SEIG.CA",
+    "SIEG.CA",
+    "SIPC.CA",
+    "SKPC.CA",
+    "SMFR.CA",
+    "SNFC.CA",
+    "SPIN.CA",
+    "SPMD.CA",
+    "SUCE.CA",
+    "SUGR.CA",
+    "SVCE.CA",
+    "SWDY.CA",
+    "TALM.CA",
+    "TANM.CA",
+    "TAQA.CA",
+    "TMGH.CA",
+    "TORA.CA",
+    "TWSA.CA",
+    "TYCN.CA",
+    "UBEE.CA",
+    "UEFM.CA",
+    "UEGC.CA",
+    "UNIP.CA",
+    "UNIT.CA",
+    "UPMS.CA",
+    "UTOP.CA",
+    "VALU.CA",
+    "VERT.CA",
+    "VLMR.CA",
+    "VLMRA.CA",
+    "WCDF.CA",
+    "WKOL.CA",
+    "ZEOT.CA",
+    "ZMID.CA",
+]
+
+print("🌐 1. جلب البيانات اللحظية المباشرة من TradingView...")
+tv_live_data = fetch_tradingview_live_data()
+
+print(
+    f"🚀 2. جلب البيانات التاريخية لآخر سنة (1 Year) لـ {len(tickers)} سهم من"
+    " Yahoo Finance..."
+)
+start_time = time.time()
+data = yf.download(
+    tickers,
+    period="1y",
+    interval="1d",
+    group_by="ticker",
+    threads=True,
+    progress=False,
+)
+print(f"⚡ تم تحميل البيانات في {time.time() - start_time:.2f} ثانية.\n")
+
+
+def process_single_ticker(ticker, df_ticker_data, tv_data):
+  try:
+    df = df_ticker_data.dropna().copy()
+    df.columns = [col.lower() for col in df.columns]
+
+    # دمج شمعة اليوم اللحظية من TradingView
+    df = merge_tv_live_row(df, ticker, tv_data)
+
+    if len(df) < 30:
+      return []
+
+    engine = AscendingTriangleEngine(
+        DetectorConfig(strictness=Strictness.BALANCED)
+    )
+    return engine.detect(df, ticker=ticker)
+  except Exception:
+    return []
+
+
+print("🔍 3. إجراء المعالجة المتوازية وفحص النماذج الصاعدة...")
+all_detected_patterns = []
+
+with ProcessPoolExecutor() as executor:
+  futures = {}
+  for ticker in tickers:
+    if ticker in data.columns.levels[0]:
+      df_ticker = data[ticker]
+      futures[executor.submit(
+          process_single_ticker, ticker, df_ticker, tv_live_data
+      )] = ticker
+
+  for future in tqdm(
+      as_completed(futures),
+      total=len(futures),
+      desc="تقدم فحص الأسهم",
+      unit="stock",
+  ):
+    patterns = future.result()
+    if patterns:
+      all_detected_patterns.extend(patterns)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 5. EXCEL EXPORT & BEAUTIFUL STYLING MATCHING IMAGE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+results = []
+for p in all_detected_patterns:
+  results.append({
+      "Stock Name": p.ticker,
+      "Entry Date": p.breakout_date,
+      "Exit Date": p.exit_date,
+      "Win Rate": p.pnl_pct / 100.0,  # تحويلها لـ Decimal للتنسيق في إكسيل
+      "Status": p.status,
+  })
+
+df_results = pd.DataFrame(results)
+
+if not df_results.empty:
+  # إزالة التكرارات للصفقة الواحدة لنفس السهم بنفس تاريخ الدخول
+  df_results = df_results.drop_duplicates(
+      subset=["Stock Name", "Entry Date"]
+  ).reset_index(drop=True)
+
+  # الترتيب الزمني من الأقدم إلى الأحدث
+  df_results["Entry_Sort"] = pd.to_datetime(df_results["Entry Date"])
+  df_results = (
+      df_results.sort_values(by="Entry_Sort", ascending=True)
+      .drop(columns=["Entry_Sort"])
+      .reset_index(drop=True)
+  )
+
+  excel_file = "egx_ascending_triangles_1y_live.xlsx"
+
+  # تصدير إلى Excel بتنسيق مطابق تماماً للصورة
+  with pd.ExcelWriter(excel_file, engine="openpyxl") as writer:
+    df_results.to_excel(writer, sheet_name="Trade_Results", index=False)
+    workbook = writer.book
+    worksheet = writer.sheets["Trade_Results"]
+
+    # الترويسة الرئيسية
+    header_fill = PatternFill(
+        start_color="1F497D", end_color="1F497D", fill_type="solid"
+    )
+    header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+
+    # ألوان الحالات (Win/Loss/Open)
+    win_fill = PatternFill(
+        start_color="E2EFDA", end_color="E2EFDA", fill_type="solid"
+    )
+    win_font = Font(color="276A3C", bold=True)
+
+    loss_fill = PatternFill(
+        start_color="FCE4D6", end_color="FCE4D6", fill_type="solid"
+    )
+    loss_font = Font(color="C65911", bold=True)
+
+    open_fill = PatternFill(
+        start_color="D9E1F2", end_color="D9E1F2", fill_type="solid"
+    )
+    open_font = Font(color="1F497D", bold=True)
+
+    align_center = Alignment(horizontal="center", vertical="center")
+
+    # تنسيق الهيدر
+    for col_num in range(1, 6):
+      cell = worksheet.cell(row=1, column=col_num)
+      cell.fill = header_fill
+      cell.font = header_font
+      cell.alignment = align_center
+
+    # تنسيق البيانات
+    for row_idx in range(2, len(df_results) + 2):
+      status_val = worksheet.cell(row=row_idx, column=5).value
+
+      # محاذاة الأعمدة
+      for col_idx in range(1, 6):
+        c = worksheet.cell(row=row_idx, column=col_idx)
+        c.alignment = align_center
+
+      # تنسيق النسبة المئوية للـ Win Rate
+      pnl_cell = worksheet.cell(row=row_idx, column=4)
+      pnl_cell.number_format = "0.00%"
+
+      # التلوين حسب الحالة
+      status_cell = worksheet.cell(row=row_idx, column=5)
+      if status_val == "Win":
+        status_cell.fill = win_fill
+        status_cell.font = win_font
+        pnl_cell.font = win_font
+      elif status_val == "Loss":
+        status_cell.fill = loss_fill
+        status_cell.font = loss_font
+        pnl_cell.font = loss_font
+      elif status_val == "Open":
+        status_cell.fill = open_fill
+        status_cell.font = open_font
+        pnl_cell.font = open_font
+
+    # ضبط عرض الأعمدة تلقائياً
+    for col in worksheet.columns:
+      max_len = max(len(str(cell.value or "")) for cell in col)
+      col_letter = openpyxl.utils.get_column_letter(col[0].column)
+      worksheet.column_dimensions[col_letter].width = max(max_len + 4, 14)
+
+  print("\n" + "=" * 80)
+  print(f"🎉 تم الانتهاء بنجاح! إجمالي الصفقات المكتشفة: {len(df_results)}")
+  print(
+      f"📊 الصفقات الناجحة (Win): {len(df_results[df_results['Status'] == 'Win'])}"
+  )
+  print(
+      f"❌ الصفقات الخاسرة (Loss):"
+      f" {len(df_results[df_results['Status'] == 'Loss'])}"
+  )
+  print(
+      f"🔵 الصفقات المستمرة (Open):"
+      f" {len(df_results[df_results['Status'] == 'Open'])}"
+  )
+  print("=" * 80)
+
+  files.download(excel_file)
+else:
+  print("\nلم يتم العثور على أي نماذج صاعدة مطابقة للشروط في بيانات السنة الأخيرة.")

@@ -32,8 +32,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install yfinance pandas requests plotly ta-lib openpyxl
 
-      - name: Run Scan Script
+      - name: Run Chart Patterns
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python main.py
+        run: |
+          for file in *.txt; do
+            echo "Executing $file..."
+            python "$file"
+          done

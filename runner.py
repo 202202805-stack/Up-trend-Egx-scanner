@@ -8,6 +8,17 @@ import requests
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+# قائمة الاستراتيجيات السبع (اسم الملف، اسم الاستراتيجية للتليجرام)
+PYTHON_STRATEGIES = [
+    ("broadening_bottoms.py", "Broadening Bottoms"),
+    ("FLAGS.py", "Flags"),
+    ("adam_and_adam.py", "Adam & Adam"),
+    ("adam_and_eva.py", "Adam & Eve"),
+    ("ascending_triangle.py", "Ascending Triangle"),
+    ("pipe_bottom.py", "Pipe Bottom"),
+    ("tripple_bottom.py", "Triple Bottom"),
+]
+
 
 def send_telegram_message(message: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -33,7 +44,6 @@ def send_telegram_message(message: str):
 
 
 def parse_trades_from_excel(excel_file: str, strategy_name: str) -> list:
-    """استخراج الصفقات المفتوحة مباشرة من ملف الإكسيل المولد"""
     open_signals = []
     if not os.path.exists(excel_file):
         return open_signals
@@ -68,13 +78,11 @@ def parse_trades_from_excel(excel_file: str, strategy_name: str) -> list:
                 entry_p = float(row.get("Entry Price", row.get("Buy Price", row.get("Entry_Price", 0.0))) or 0.0)
                 curr_p = float(row.get("Current Price", row.get("Last Price", row.get("Close", entry_p))) or entry_p)
 
-                pnl_val = row.get("Pnp_Ratio", row.get("Pnl %", row.get("Return %", row.get("PnL", 0.0))))
-                try:
-                    pnl = float(pnl_val)
-                    if abs(pnl) <= 1.0 and pnl != 0.0:
-                        pnl = pnl * 100
-                except Exception:
-                    pnl = round(((curr_p - entry_p) / entry_p) * 100, 2) if entry_p > 0 else 0.0
+                # حساب نسبة الربح مباشرة وبدقة
+                if entry_p > 0 and curr_p > 0:
+                    pnl = round(((curr_p - entry_p) / entry_p) * 100, 2)
+                else:
+                    pnl = 0.0
 
                 stock_name = row.get("Stock Name", row.get("Ticker", row.get("Stock", row.get("Symbol", "N/A"))))
 
@@ -86,52 +94,57 @@ def parse_trades_from_excel(excel_file: str, strategy_name: str) -> list:
                     "Current Price": round(curr_p, 3),
                     "Target": round(float(row.get("Target", row.get("Target Price", 0.0)) or 0.0), 3),
                     "Stop Loss": round(float(row.get("Stop Loss", row.get("Stop", 0.0)) or 0.0), 3),
-                    "PnL": round(pnl, 2),
+                    "PnL": pnl,
                 })
     except Exception as e:
-        print(f"⚠️ Error reading excel file: {e}")
+        print(f"⚠️ Error reading excel file {excel_file}: {e}")
 
     return open_signals
 
 
 def main():
     today_str = datetime.date.today().strftime("%Y-%m-%d")
-    print(f"🚀 Running broadening_bottoms.py directly as Subprocess ({today_str})...\n")
-
-    excel_before = set(glob.glob("*.xlsx"))
-
-    # تشغيل ملف الاستراتيجية بالكامل كأنك شغلته يدويًا بالضبط
-    try:
-        subprocess.run(["python", "broadening_bottoms.py"], check=True)
-    except Exception as e:
-        print(f"⚠️ Error running script via subprocess: {e}")
-
-    # البحث عن ملف Excel الذي نتج عن العملية
-    excel_after = set(glob.glob("*.xlsx"))
-    new_files = list(excel_after - excel_before)
+    print(f"🚀 Starting EGX Multi-Strategy Full Scan ({today_str})...\n")
 
     all_open_signals = []
-    if new_files:
-        latest_excel = max(new_files, key=os.path.getmtime)
-        print(f"📁 Reading output file: {latest_excel}")
-        all_open_signals = parse_trades_from_excel(latest_excel, "Broadening Bottoms")
-    else:
-        # لو لم يتولد ملف جديد نتحقق من الملفات الموجودة حالياً
-        all_excels = glob.glob("*.xlsx")
-        if all_excels:
-            latest_excel = max(all_excels, key=os.path.getmtime)
-            all_open_signals = parse_trades_from_excel(latest_excel, "Broadening Bottoms")
 
-    print(f"\n  └─ 🟢 Found {len(all_open_signals)} OPEN position(s).")
+    for file_name, strat_name in PYTHON_STRATEGIES:
+        if not os.path.exists(file_name):
+            print(f"⚠️ File {file_name} not found. Skipping...")
+            continue
+
+        print(f"🔍 Running {file_name} ({strat_name})...")
+        excel_before = set(glob.glob("*.xlsx"))
+
+        # تشغيل السكربت كـ Subprocess مستقل
+        try:
+            subprocess.run(["python", file_name], check=True)
+        except Exception as e:
+            print(f"⚠️ Error executing {file_name}: {e}")
+            continue
+
+        # التقاط ملف الإكسيل الجديد الذي أنشأته الاستراتيجية
+        excel_after = set(glob.glob("*.xlsx"))
+        new_files = list(excel_after - excel_before)
+
+        if new_files:
+            latest_excel = max(new_files, key=os.path.getmtime)
+            signals = parse_trades_from_excel(latest_excel, strat_name)
+            all_open_signals.extend(signals)
+            print(f"  └─ 🟢 Found {len(signals)} OPEN position(s).")
+        else:
+            print("  └─ ⚪ No new Excel output generated.")
+
+    print(f"\n🌐 Total Active Signals across all strategies: {len(all_open_signals)}")
 
     if not all_open_signals:
-        msg = f"📊 <b>EGX Market Scan ({today_str})</b>\n\nNo active OPEN signals found for Broadening Bottoms."
+        msg = f"📊 <b>EGX Market Scan ({today_str})</b>\n\nNo active OPEN signals found across all 7 strategies today."
         print("\n" + msg)
         send_telegram_message(msg)
         return
 
     msg_lines = [
-        "🚨 <b>EGX SCAN - ACTIVE BROADENING BOTTOM SIGNALS</b> 🚨",
+        "🚨 <b>EGX ALL STRATEGIES - ACTIVE SIGNALS</b> 🚨",
         f"📅 <i>Date: {today_str}</i>",
         f"🌐 Total Signals: <b>{len(all_open_signals)}</b>\n",
         "========================================",

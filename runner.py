@@ -27,7 +27,6 @@ def send_telegram_message(message: str):
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
-    # تقطيع الرسالة إلى أجزاء إذا تجاوزت 4000 حرف لتجنب رفض Telegram API
     max_len = 4000
     chunks = [
         message[i : i + max_len] for i in range(0, len(message), max_len)
@@ -49,12 +48,24 @@ def send_telegram_message(message: str):
             print(f"⚠️ Exception sending Telegram message: {e}")
 
 
+def find_actual_file(target_filename: str) -> str:
+    """البحث عن الملف بغض النظر عن حالة الحروف الكبيرة والصغيرة"""
+    if os.path.exists(target_filename):
+        return target_filename
+
+    current_dir_files = os.listdir(".")
+    for f in current_dir_files:
+        if f.lower() == target_filename.lower():
+            return f
+    return target_filename
+
+
 def extract_trades(local_scope, strategy_name, excel_files_before):
     """استخراج الصفقات المفتوحة بناءً على شرط State/Status == Open أو عدم وجود تاريخ خروج"""
     extracted_open_trades = []
     df_result = None
 
-    # 1. البحث عن ملف Excel الجديد الذي تم إنشاؤه أثناء تشغيل هذا الملف
+    # 1. البحث عن ملف Excel الجديد الذي تم إنشاؤه أثناء تشغيل هذا الملف تحديداً
     excel_files_after = set(glob.glob("*.xlsx"))
     new_excel_files = list(excel_files_after - excel_files_before)
 
@@ -66,7 +77,7 @@ def extract_trades(local_scope, strategy_name, excel_files_before):
         except Exception as e:
             print(f"  └─ ⚠️ Could not read Excel {latest_file}: {e}")
 
-    # 2. إذا لم يجد ملف Excel جديد، يبحث في متغيرات الذاكرة
+    # 2. البحث في ذاكرة المتغيرات المحلية إن لم يوجد ملف Excel جديد
     if df_result is None or df_result.empty:
         for var_name in [
             "all_trades",
@@ -76,11 +87,9 @@ def extract_trades(local_scope, strategy_name, excel_files_before):
             "open_positions",
             "df_results",
             "open_trades",
+            "df",
         ]:
-            if (
-                var_name in local_scope
-                and local_scope[var_name] is not None
-            ):
+            if var_name in local_scope and local_scope[var_name] is not None:
                 val = local_scope[var_name]
                 if isinstance(val, pd.DataFrame):
                     df_result = val.copy()
@@ -94,7 +103,7 @@ def extract_trades(local_scope, strategy_name, excel_files_before):
     # توحيد أسماء الأعمدة وإزالة المسافات الزائدة
     df_result.columns = [str(c).strip().title() for c in df_result.columns]
 
-    # 3. تحديد الصفقات المفتوحة بمرونة عالية (دعم State و Status)
+    # 3. تحديد الصفقات المفتوحة بمرونة عالية
     status_col = None
     for col in ["State", "Status", "Trade Status", "Position Status"]:
         if col in df_result.columns:
@@ -107,7 +116,7 @@ def extract_trades(local_scope, strategy_name, excel_files_before):
             exit_date_col = col
             break
 
-    # الأولوية لعمود State/Status إذا وجد، ثم الاعتماد على تاريخ الخروج
+    # تصفية الصفقات المفتوحة
     if status_col:
         open_df = df_result[
             df_result[status_col]
@@ -185,28 +194,45 @@ def extract_trades(local_scope, strategy_name, excel_files_before):
 
 
 def run_txt_script(filename: str, strategy_name: str):
-    if not os.path.exists(filename):
-        print(f"⚠️ File not found: {filename}")
+    actual_filename = find_actual_file(filename)
+
+    if not os.path.exists(actual_filename):
+        print(
+            f"⚠️ File not found: {filename} (Searched as: {actual_filename})"
+        )
         return []
 
-    print(f"🔍 Processing: {filename} ({strategy_name})...")
+    print(f"🔍 Processing: {actual_filename} ({strategy_name})...")
+    
+    # 1. عزل الذاكرة بشكل مستثقل لضمان عدم تداخل نتائج الملفات
     local_scope = {}
     excel_files_before = set(glob.glob("*.xlsx"))
 
     try:
-        with open(filename, "r", encoding="utf-8") as f:
+        with open(actual_filename, "r", encoding="utf-8") as f:
             code = f.read()
 
+        # تنفيذ الكود في نطاق مخصص
         exec(code, local_scope)
 
         open_trades = extract_trades(
             local_scope, strategy_name, excel_files_before
         )
         print(f"  └─ 🟢 Found {len(open_trades)} OPEN position(s).")
+
+        # 2. حرق وتحديث أي ملفات إكسيل تم إنشاؤها لتجنب خلط البيانات بالملف القادم
+        excel_files_after = set(glob.glob("*.xlsx"))
+        new_files = excel_files_after - excel_files_before
+        for nf in new_files:
+            try:
+                os.remove(nf)
+            except Exception:
+                pass
+
         return open_trades
 
     except Exception as e:
-        print(f"⚠️ Error executing {filename}: {e}")
+        print(f"⚠️ Error executing {actual_filename}: {e}")
         return []
 
 
@@ -253,6 +279,10 @@ def main():
     print("\n" + final_msg)
 
     send_telegram_message(final_msg)
+
+
+if __name__ == "__main__":
+    main()
 
 
 if __name__ == "__main__":

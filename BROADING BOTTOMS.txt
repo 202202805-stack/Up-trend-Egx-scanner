@@ -2,7 +2,7 @@
 """
 ================================================================================
 BROADENING BOTTOMS BACKTESTER & SCANNER
-(1-YEAR DATA + TRADINGVIEW LIVE + DYNAMIC P6 TARGET + OPEN POSITIONS)
+(1-YEAR DATA + TRADINGVIEW LIVE + DYNAMIC P6 TARGET + OPEN POSITIONS + STATUS)
 ================================================================================
 """
 
@@ -65,7 +65,7 @@ def fetch_tradingview_live_data(tickers: List[str]) -> dict:
                         "Volume": float(vals[5]) if vals[5] is not None else 0.0
                     }
     except Exception as e:
-        print(f"   [TV Warning] Could not fetch live data from TradingView: {e}")
+        print(f"    [TV Warning] Could not fetch live data from TradingView: {e}")
 
     return tv_data
 
@@ -239,7 +239,7 @@ class BroadeningBottomDetector:
 
 
 # ==============================================================================
-# 3. BACKTEST ENGINE WITH REAL OPEN POSITIONS DETECTION
+# 3. BACKTEST ENGINE WITH REAL OPEN POSITIONS DETECTION & STATUS
 # ==============================================================================
 
 def run_backtest_on_stock(
@@ -295,7 +295,8 @@ def run_backtest_on_stock(
                     'Target': target_p6,
                     'Stop Loss': stop_loss,
                     'Exit Date': None,  # يترك فارغاً حقيقياً للصفقة المفتوحة
-                    'Current Price': latest_close_price
+                    'Current Price': latest_close_price,
+                    'Status': 'Open'
                 })
                 i += step_size
                 continue
@@ -317,17 +318,20 @@ def run_backtest_on_stock(
                     exit_date = date_idx
                     break
 
-            # معالجة الصفقات:
-            # إذا لم تضرب الهدف أو الوقف، وتصل للحظة الحالية (البيانات لم تنتهِ بعد أو انتهت مدة max_holding_bars ولم تخرج)
+            # معالجة الصفقات المفتوحة والمغلقة:
             if status is None:
                 if (entry_idx + 1 + len(future_df)) >= len(df):
                     # الصفقة مستمرة حتى اليوم ولم تكتمل مدتها أو لم تضرب الهدف/الوقف
                     exit_date_str = None
+                    status_str = 'Open'
                 else:
-                    # اكتملت مدة الاحتفاظ max_holding_bars دون ضرب هدف أو وقف (إغلاق بسبب الزمن حسب أصل الكود)
+                    # اكتملت مدة الاحتفاظ دون ضرب هدف أو وقف حاد
                     exit_date_str = future_df.index[-1].strftime('%Y-%m-%d')
+                    exit_price = future_df['close'].iloc[-1]
+                    status_str = 'Win' if exit_price >= entry_price else 'Loss'
             else:
                 exit_date_str = exit_date.strftime('%Y-%m-%d')
+                status_str = status
 
             trades.append({
                 'Stock Name': ticker,
@@ -336,7 +340,8 @@ def run_backtest_on_stock(
                 'Target': target_p6,
                 'Stop Loss': stop_loss,
                 'Exit Date': exit_date_str,
-                'Current Price': latest_close_price
+                'Current Price': latest_close_price,
+                'Status': status_str
             })
 
             i += window_size // 2
@@ -347,7 +352,7 @@ def run_backtest_on_stock(
 
 
 # ==============================================================================
-# 4. SINGLE-SHEET EXCEL FORMATTING (7 COLUMNS)
+# 4. SINGLE-SHEET EXCEL FORMATTING (8 COLUMNS INCLUDING STATUS)
 # ==============================================================================
 
 def format_excel_file(excel_filename: str):
@@ -375,7 +380,16 @@ def format_excel_file(excel_filename: str):
         cell.font = header_font
         cell.alignment = align_center
 
-    columns = ['Stock Name', 'Entry Date', 'Entry Price', 'Target', 'Stop Loss', 'Exit Date', 'Current Price']
+    columns = ['Stock Name', 'Entry Date', 'Entry Price', 'Target', 'Stop Loss', 'Exit Date', 'Current Price', 'Status']
+
+    # ألوان خانة الـ Status
+    win_fill = PatternFill(start_color="D4EDDA", end_color="D4EDDA", fill_type="solid")   # أخضر فاتح
+    loss_fill = PatternFill(start_color="F8D7DA", end_color="F8D7DA", fill_type="solid")  # أحمر فاتح
+    open_fill = PatternFill(start_color="FFF3CD", end_color="FFF3CD", fill_type="solid")  # أصفر فاتح
+
+    win_font = Font(name="Calibri", size=11, bold=True, color="155724")
+    loss_font = Font(name="Calibri", size=11, bold=True, color="721C24")
+    open_font = Font(name="Calibri", size=11, bold=True, color="856404")
 
     for row in range(2, ws.max_row + 1):
         ws.row_dimensions[row].height = 20
@@ -385,11 +399,24 @@ def format_excel_file(excel_filename: str):
             cell.border = thin_border
             cell.alignment = align_center
 
-            col_name = columns[col - 1]
+            col_name = columns[col - 1] if col - 1 < len(columns) else ""
 
-            # Currency / Price Format for numeric values
+            # تنسيق الأرقام والأسعار
             if col_name in ['Entry Price', 'Target', 'Stop Loss', 'Current Price']:
                 cell.number_format = '#,##0.00'
+
+            # التنسيق الشرطي لعمود الـ Status
+            if col_name == 'Status':
+                val = str(cell.value).strip() if cell.value else ""
+                if val == 'Win':
+                    cell.fill = win_fill
+                    cell.font = win_font
+                elif val == 'Loss':
+                    cell.fill = loss_fill
+                    cell.font = loss_font
+                elif val == 'Open':
+                    cell.fill = open_fill
+                    cell.font = open_font
 
     column_widths = {
         'A': 18,  # Stock Name
@@ -398,7 +425,8 @@ def format_excel_file(excel_filename: str):
         'D': 15,  # Target
         'E': 15,  # Stop Loss
         'F': 16,  # Exit Date
-        'G': 16   # Current Price
+        'G': 16,  # Current Price
+        'H': 14   # Status
     }
     for col_letter, width in column_widths.items():
         ws.column_dimensions[col_letter].width = width

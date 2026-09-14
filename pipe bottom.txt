@@ -177,6 +177,7 @@ class PipeBottomSignal:
                 self.exit_date.strftime("%Y-%m-%d") if self.exit_date else ""
             ),
             "Current Price": self.current_price,
+            "Status": self.trade_status,  # إضافة حالة السهم
         }
 
 
@@ -861,6 +862,7 @@ else:
             "Stop Loss",
             "Exit Date",
             "Current Price",
+            "Status",
         ]
     )
 
@@ -885,6 +887,22 @@ with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
         bottom=Side(style="thin", color="D9D9D9"),
     )
 
+    # ألوان حالة الصفقة (Badges)
+    status_styles = {
+        "WIN": {
+            "fill": PatternFill(start_color="E2EFDA", fill_type="solid"),
+            "font": Font(name="Calibri", size=11, bold=True, color="375623"),
+        },
+        "LOSS": {
+            "fill": PatternFill(start_color="FCE4D6", fill_type="solid"),
+            "font": Font(name="Calibri", size=11, bold=True, color="C65911"),
+        },
+        "OPEN": {
+            "fill": PatternFill(start_color="FFF2CC", fill_type="solid"),
+            "font": Font(name="Calibri", size=11, bold=True, color="896800"),
+        },
+    }
+
     # 1. Header Styling
     for col_num in range(1, len(df_results.columns) + 1):
         cell = worksheet.cell(row=1, column=col_num)
@@ -903,6 +921,12 @@ with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
             # Number format for prices
             if col_num in [3, 4, 5, 7] and isinstance(cell.value, (int, float)):
                 cell.number_format = "#,##0.00"
+
+            # Formatting Status column (Column 8)
+            if col_num == 8 and cell.value in status_styles:
+                status_val = str(cell.value)
+                cell.fill = status_styles[status_val]["fill"]
+                cell.font = status_styles[status_val]["font"]
 
     # 3. Column Widths
     for col in worksheet.columns:

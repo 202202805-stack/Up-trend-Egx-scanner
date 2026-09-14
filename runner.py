@@ -50,7 +50,7 @@ def send_telegram_message(message: str):
 
 
 def extract_trades(local_scope, strategy_name, excel_files_before):
-    """استخراج الصفقات المفتوحة بناءً على شرط Status == Open أو عدم وجود تاريخ خروج"""
+    """استخراج الصفقات المفتوحة بناءً على شرط State/Status == Open أو عدم وجود تاريخ خروج"""
     extracted_open_trades = []
     df_result = None
 
@@ -91,27 +91,28 @@ def extract_trades(local_scope, strategy_name, excel_files_before):
     if df_result is None or df_result.empty:
         return []
 
-    # توحيد أسماء الأعمدة
+    # توحيد أسماء الأعمدة وإزالة المسافات الزائدة
     df_result.columns = [str(c).strip().title() for c in df_result.columns]
 
-    # 3. تحديد الصفقات المفتوحة بمرونة عالية
+    # 3. تحديد الصفقات المفتوحة بمرونة عالية (دعم State و Status)
     status_col = None
-    for col in ["Status", "Trade Status", "Position Status", "State"]:
+    for col in ["State", "Status", "Trade Status", "Position Status"]:
         if col in df_result.columns:
             status_col = col
             break
 
     exit_date_col = None
-    for col in ["Exit Date", "Exit_Date", "ExitDate", "Close Date"]:
+    for col in ["Exit Date", "Exit_Date", "Exitdate", "Close Date"]:
         if col in df_result.columns:
             exit_date_col = col
             break
 
-    # الأولوية لعمود Status إذا وجد، ثم الاعتماد على تاريخ الخروج
+    # الأولوية لعمود State/Status إذا وجد، ثم الاعتماد على تاريخ الخروج
     if status_col:
         open_df = df_result[
             df_result[status_col]
             .astype(str)
+            .str.strip()
             .str.upper()
             .str.contains("OPEN|ACTIVE|مفتوحة|مستمرة")
         ]
@@ -134,7 +135,7 @@ def extract_trades(local_scope, strategy_name, excel_files_before):
         def get_val(keys, default=0.0):
             for k in keys:
                 for col in df_result.columns:
-                    if k.lower() in col.lower():
+                    if k.lower() == col.lower():
                         val = row.get(col)
                         if pd.notnull(val):
                             return val
@@ -148,7 +149,7 @@ def extract_trades(local_scope, strategy_name, excel_files_before):
         curr_p = get_val(
             ["Current Price", "Last Price", "Close", "Current_Price"], entry_p
         )
-        target = get_val(["Target Price", "Target", "Target_Price"], 0.0)
+        target = get_val(["Target", "Target Price", "Target_Price"], 0.0)
         stop = get_val(["Stop Loss", "Stop", "Stop_Loss"], 0.0)
         pnl = get_val(
             ["Pnp_Ratio", "PnL %", "Unrealized PnL %", "Return %", "Pnl"],
@@ -244,7 +245,7 @@ def main():
             f"📊 Current Price: {sig['Current Price']} EGP ({pnl_emoji} {pnl_val:+.2f}%)\n"
             f"🎯 Target: <b>{sig['Target']} EGP</b>\n"
             f"🛑 Stop Loss: <b>{sig['Stop Loss']} EGP</b>\n"
-            "----------------------------------------"
+            f"----------------------------------------"
         )
         msg_lines.append(card)
 

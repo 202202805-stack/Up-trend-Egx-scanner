@@ -8,17 +8,6 @@ import requests
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# قائمة الاستراتيجيات السبع (اسم الملف، اسم الاستراتيجية للتليجرام)
-PYTHON_STRATEGIES = [
-    ("broadening_bottoms.py", "Broadening Bottoms"),
-    ("FLAGS.py", "Flags"),
-    ("adam_and_adam.py", "Adam & Adam"),
-    ("adam_and_eva.py", "Adam & Eve"),
-    ("ascending_triangle.py", "Ascending Triangle"),
-    ("pipe_bottom.py", "Pipe Bottom"),
-    ("tripple_bottom.py", "Triple Bottom"),
-]
-
 
 def send_telegram_message(message: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -41,6 +30,28 @@ def send_telegram_message(message: str):
                 print(f"❌ Telegram API Error: {res.text}")
         except Exception as e:
             print(f"⚠️ Exception sending Telegram message: {e}")
+
+
+def get_all_strategy_files() -> list:
+    """اكتشاف كل ملفات البايثون في المجلد تلقائياً واستثناء runner.py"""
+    all_py_files = glob.glob("*.py")
+    strategies = []
+
+    for file_path in sorted(all_py_files):
+        file_name = os.path.basename(file_path)
+
+        # استبعاد ملف runner الرئيسي أو أي ملفات إعدادات قد تبدأ بـ _
+        if file_name.lower() == "runner.py" or file_name.startswith("_"):
+            continue
+
+        # تحويل اسم الملف إلى اسم استراتيجية منسق للتليجرام
+        # مثال: adam_and_eva.py -> Adam And Eva
+        clean_name = os.path.splitext(file_name)[0]
+        pretty_strategy_name = clean_name.replace("_", " ").title()
+
+        strategies.append((file_name, pretty_strategy_name))
+
+    return strategies
 
 
 def parse_trades_from_excel(excel_file: str, strategy_name: str) -> list:
@@ -78,7 +89,7 @@ def parse_trades_from_excel(excel_file: str, strategy_name: str) -> list:
                 entry_p = float(row.get("Entry Price", row.get("Buy Price", row.get("Entry_Price", 0.0))) or 0.0)
                 curr_p = float(row.get("Current Price", row.get("Last Price", row.get("Close", entry_p))) or entry_p)
 
-                # حساب نسبة الربح مباشرة وبدقة
+                # حساب نسبة الربح مباشرة من سعر الدخول والسعر الحالي
                 if entry_p > 0 and curr_p > 0:
                     pnl = round(((curr_p - entry_p) / entry_p) * 100, 2)
                 else:
@@ -104,26 +115,25 @@ def parse_trades_from_excel(excel_file: str, strategy_name: str) -> list:
 
 def main():
     today_str = datetime.date.today().strftime("%Y-%m-%d")
-    print(f"🚀 Starting EGX Multi-Strategy Full Scan ({today_str})...\n")
+
+    # اكتشاف الملفات تلقائياً
+    python_strategies = get_all_strategy_files()
+
+    print(f"🚀 Starting Dynamic EGX Multi-Strategy Scan ({today_str})...")
+    print(f"💡 Detected {len(python_strategies)} strategy file(s) in repository.\n")
 
     all_open_signals = []
 
-    for file_name, strat_name in PYTHON_STRATEGIES:
-        if not os.path.exists(file_name):
-            print(f"⚠️ File {file_name} not found. Skipping...")
-            continue
-
+    for file_name, strat_name in python_strategies:
         print(f"🔍 Running {file_name} ({strat_name})...")
         excel_before = set(glob.glob("*.xlsx"))
 
-        # تشغيل السكربت كـ Subprocess مستقل
         try:
             subprocess.run(["python", file_name], check=True)
         except Exception as e:
             print(f"⚠️ Error executing {file_name}: {e}")
             continue
 
-        # التقاط ملف الإكسيل الجديد الذي أنشأته الاستراتيجية
         excel_after = set(glob.glob("*.xlsx"))
         new_files = list(excel_after - excel_before)
 
@@ -138,7 +148,7 @@ def main():
     print(f"\n🌐 Total Active Signals across all strategies: {len(all_open_signals)}")
 
     if not all_open_signals:
-        msg = f"📊 <b>EGX Market Scan ({today_str})</b>\n\nNo active OPEN signals found across all 7 strategies today."
+        msg = f"📊 <b>EGX Market Scan ({today_str})</b>\n\nNo active OPEN signals found today across {len(python_strategies)} strategies."
         print("\n" + msg)
         send_telegram_message(msg)
         return

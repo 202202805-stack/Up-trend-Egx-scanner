@@ -1,15 +1,9 @@
 import datetime
-import glob
+import json
 import os
-import time
+import re
 import pandas as pd
 import requests
-
-# ضبط متصفح وهمي لمنع حظر خوادم GitHub من مصادر البيانات
-os.environ["HTTP_USER_AGENT"] = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
-    " like Gecko) Chrome/120.0.0.0 Safari/537.36"
-)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -26,8 +20,9 @@ TXT_FILES = [
 
 
 def send_telegram_message(message: str):
+    """إرسال الرسالة إلى التليجرام"""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Telegram Secrets missing/not configured.")
+        print("⚠️ Telegram Secrets missing.")
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -49,10 +44,11 @@ def send_telegram_message(message: str):
             else:
                 print(f"❌ Telegram API Error: {res.text}")
         except Exception as e:
-            print(f"⚠️ Exception sending Telegram message: {e}")
+            print(f"⚠️ Telegram Exception: {e}")
 
 
 def find_actual_file(target_filename: str) -> str:
+    """معالجة اختلاف حالة الأحرف في نظام Linux"""
     if os.path.exists(target_filename):
         return target_filename
     for f in os.listdir("."):
@@ -61,237 +57,172 @@ def find_actual_file(target_filename: str) -> str:
     return target_filename
 
 
-def extract_trades(local_scope, strategy_name, excel_files_before):
-    extracted_open_trades = []
-    df_result = None
-
-    # 1. البحث عن ملفات إكسيل حديثة
-    excel_files_after = set(glob.glob("*.xlsx"))
-    new_excel_files = list(excel_files_after - excel_files_before)
-
-    if new_excel_files:
-        latest_file = max(new_excel_files, key=os.path.getmtime)
-        try:
-            df_result = pd.read_excel(latest_file)
-            print(f"  └─ 📁 Read from Excel: {latest_file}")
-        except Exception as e:
-            print(f"  └─ ⚠️ Could not read Excel {latest_file}: {e}")
-
-    # 2. فحص الذاكرة عند عدم وجود ملف إكسيل
-    if df_result is None or df_result.empty:
-        for var_name, var_value in local_scope.items():
-            if var_name.startswith("__"):
-                continue
-            if isinstance(var_value, pd.DataFrame) and not var_value.empty:
-                df_result = var_value.copy()
-                print(f"  └─ 🧠 Found DataFrame in memory: '{var_name}'")
-                break
-            elif isinstance(var_value, list) and len(var_value) > 0:
-                if isinstance(var_value[0], dict):
-                    df_result = pd.DataFrame(var_value)
-                    print(
-                        f"  └─ 🧠 Converted list of dicts from memory: '{var_name}'"
-                    )
-                    break
-
-    if df_result is None or df_result.empty:
-        print("  └─ ⚠️ No DataFrame or list of trades found in memory.")
-        return []
-
-    # توحيد أسماء الأعمدة
-    df_result.columns = [str(c).strip().title() for c in df_result.columns]
-
-    # 3. تحديد أعمدة الحالة وتاريخ الخروج بمرونة كاملة
-    status_col = None
-    for col in [
-        "State",
-        "Status",
-        "Trade Status",
-        "Position Status",
-        "Trade_State",
-        "Result",
-    ]:
-        if col in df_result.columns:
-            status_col = col
-            break
-
-    exit_date_col = None
-    for col in [
-        "Exit Date",
-        "Exit_Date",
-        "Exitdate",
-        "Close Date",
-        "Close_Date",
-    ]:
-        if col in df_result.columns:
-            exit_date_col = col
-            break
-
-    # 4. تصفية الصفقات المفتوحة
-    open_df = pd.DataFrame()
-
-    if status_col:
-        open_mask = (
-            df_result[status_col]
-            .astype(str)
-            .str.strip()
-            .str.upper()
-            .str.contains("OPEN|ACTIVE|مفتوحة|مستمرة|HOLD|RUNNING|1|TRUE")
-        )
-        closed_mask = (
-            df_result[status_col]
-            .astype(str)
-            .str.strip()
-            .str.upper()
-            .str.contains("WIN|LOSS|CLOSED|مغلقة|مكسب|خسارة")
-        )
-        open_df = df_result[open_mask & (~closed_mask)]
-
-    if open_df.empty and exit_date_col:
-        open_df = df_result[
-            df_result[exit_date_col].isna()
-            | (df_result[exit_date_col].astype(str).str.strip() == "")
-            | (df_result[exit_date_col].astype(str).str.lower() == "nan")
-            | (df_result[exit_date_col].astype(str).str.lower() == "nat")
-            | (df_result[exit_date_col].astype(str).str.lower() == "none")
-            | (df_result[exit_date_col].astype(str).str.strip() == "-")
-        ]
-
-    if open_df.empty and not status_col and not exit_date_col:
-        open_df = df_result.copy()
-
-    if open_df.empty:
-        print("  └─ ℹ️ Trades found, but 0 positions matched 'OPEN' state.")
-        return []
-
-    # 5. استخراج الصفقات
-    for _, row in open_df.iterrows():
-
-        def get_val(keys, default=0.0):
-            for k in keys:
-                for col in df_result.columns:
-                    if k.lower() == col.lower():
-                        val = row.get(col)
-                        if pd.notnull(val):
-                            return val
-            return default
-
-        stock = get_val(["Stock Name", "Ticker", "Stock", "Symbol"], "N/A")
-        entry_d = get_val(["Entry Date", "Date", "Entry_Date"], "N/A")
-        entry_p = get_val(
-            ["Entry Price", "Buy Price", "Entry_Price", "Price"], 0.0
-        )
-        curr_p = get_val(
-            ["Current Price", "Last Price", "Close", "Current_Price"], entry_p
-        )
-        target = get_val(["Target", "Target Price", "Target_Price"], 0.0)
-        stop = get_val(["Stop Loss", "Stop", "Stop_Loss"], 0.0)
-        pnl = get_val(
-            ["Pnp_Ratio", "PnL %", "Unrealized PnL %", "Return %", "Pnl"],
-            0.0,
-        )
-
-        try:
-            entry_float = float(entry_p)
-            curr_float = float(curr_p)
-            pnl_float = float(pnl)
-
-            if pnl_float == 0.0 and entry_float > 0 and curr_float > 0:
-                pnl = ((curr_float - entry_float) / entry_float) * 100
-            elif abs(pnl_float) <= 1.0 and pnl_float != 0.0:
-                pnl = pnl_float * 100
-            else:
-                pnl = pnl_float
-        except Exception:
-            pnl = 0.0
-
-        extracted_open_trades.append({
-            "Strategy": strategy_name,
-            "Stock": str(stock).replace(".CA", ""),
-            "Entry Date": str(entry_d)[:10],
-            "Entry Price": round(float(entry_p), 3) if entry_p else 0.0,
-            "Current Price": round(float(curr_p), 3) if curr_p else 0.0,
-            "Target": round(float(target), 3) if target else 0.0,
-            "Stop Loss": round(float(stop), 3) if stop else 0.0,
-            "PnL": round(float(pnl), 2),
-        })
-
-    return extracted_open_trades
-
-
-def run_txt_script(filename: str, strategy_name: str, max_retries: int = 2):
+def process_and_save_strategy(filename: str, strategy_name: str):
+    """تشغيل كل استراتيجية بشكل منفصل واستخراج صفقاتها في ملف JSON محلي"""
     actual_filename = find_actual_file(filename)
+    json_output_name = (
+        f"output_{re.sub(r'[^a-zA-Z0-9]', '_', strategy_name).lower()}.json"
+    )
 
     if not os.path.exists(actual_filename):
-        print(f"⚠️ File not found: {filename}")
-        return []
+        print(f"⚠️ [Missing File]: {filename}")
+        return
 
-    print(f"🔍 Processing: {actual_filename} ({strategy_name})...")
+    print(f"\n🔍 Executing: {actual_filename} ({strategy_name})...")
 
-    for attempt in range(1, max_retries + 1):
-        local_scope = {}
-        excel_files_before = set(glob.glob("*.xlsx"))
+    scope = {}
+    try:
+        with open(actual_filename, "r", encoding="utf-8") as f:
+            code = f.read()
 
-        try:
-            with open(actual_filename, "r", encoding="utf-8") as f:
-                code = f.read()
+        # تنفيذ الكود في بيئة مستقلة
+        exec(code, scope)
 
-            exec(code, local_scope)
+        found_dfs = []
 
-            open_trades = extract_trades(
-                local_scope, strategy_name, excel_files_before
-            )
+        # 1. البحث في الذاكرة عن أي DataFrame
+        for var_name, var_val in scope.items():
+            if not var_name.startswith("__") and isinstance(
+                var_val, pd.DataFrame
+            ):
+                if not var_val.empty:
+                    found_dfs.append(var_val.copy())
 
-            # نظف ملفات الـ Excel الناتجة فوراً
-            excel_files_after = set(glob.glob("*.xlsx"))
-            for nf in excel_files_after - excel_files_before:
+        # 2. قراءة أي ملف Excel جُدَّدَ على القرص
+        for file in os.listdir("."):
+            if file.endswith(".xlsx") and not file.startswith("~$"):
                 try:
-                    os.remove(nf)
+                    df = pd.read_excel(file)
+                    if not df.empty:
+                        found_dfs.append(df)
                 except Exception:
                     pass
 
-            if open_trades or attempt == max_retries:
-                print(f"  └─ 🟢 Result: {len(open_trades)} OPEN position(s).")
-                return open_trades
+        if not found_dfs:
+            print(f"  └─ ⚠️ No data extracted for {strategy_name}.")
+            return
 
-            print(
-                f"  └─ 🔄 Attempt {attempt} returned 0 trades. Retrying in 3"
-                " seconds..."
-            )
-            time.sleep(3)
+        # دمج البيانات المكتشفة
+        final_df = pd.concat(found_dfs, ignore_index=True).drop_duplicates()
 
-        except Exception as e:
-            print(f"⚠️ Error executing {actual_filename} (Attempt {attempt}): {e}")
-            if attempt < max_retries:
-                time.sleep(3)
+        # تنظيف أسماء الأعمدة (حذف المسافات وتحويلها لـ Title Case)
+        final_df.columns = [
+            str(c).strip().replace("_", " ").title() for c in final_df.columns
+        ]
+
+        # البحث عن عمود حالة الصفقة (State / Status)
+        state_col = None
+        for col in ["State", "Status", "Trade State", "Trade Status"]:
+            if col in final_df.columns:
+                state_col = col
+                break
+
+        open_trades = []
+
+        # الفلترة الدقيقة للصفقات التي حالتها OPEN فقط
+        for _, row in final_df.iterrows():
+            is_open = False
+
+            if state_col:
+                val = str(row.get(state_col, "")).strip().lower()
+                # الاعتماد المباشر على مطابقة open وتجاهل win / loss
+                if "open" in val or val == "active":
+                    is_open = True
             else:
-                return []
+                # إذا لم يوجد عمود state نعتبر الصفقة مفتوحة بشكل افتراضي
+                is_open = True
+
+            if is_open:
+                # استخراج القيم الأساسية
+                def get_val(keys, default="N/A"):
+                    for k in keys:
+                        for c in final_df.columns:
+                            if k.lower() == c.lower():
+                                return row[c]
+                    return default
+
+                stock = get_val(
+                    ["Stock Name", "Ticker", "Stock", "Symbol"], "N/A"
+                )
+                entry_d = get_val(["Entry Date", "Date", "Entry_Date"], "N/A")
+                entry_p = get_val(
+                    ["Entry Price", "Buy Price", "Price", "Entry_Price"], 0.0
+                )
+                curr_p = get_val(
+                    ["Current Price", "Last Price", "Close"], entry_p
+                )
+                target = get_val(["Target", "Target Price"], 0.0)
+                stop = get_val(["Stop Loss", "Stop"], 0.0)
+
+                # حساب نسبة الربح/الخسارة PnL
+                try:
+                    ep, cp = float(entry_p), float(curr_p)
+                    pnl = ((cp - ep) / ep) * 100 if ep > 0 else 0.0
+                except Exception:
+                    pnl = 0.0
+
+                open_trades.append({
+                    "Strategy": strategy_name,
+                    "Stock": str(stock).replace(".CA", ""),
+                    "Entry Date": str(entry_d)[:10],
+                    "Entry Price": (
+                        round(float(entry_p), 3) if entry_p != "N/A" else 0.0
+                    ),
+                    "Current Price": (
+                        round(float(curr_p), 3) if curr_p != "N/A" else 0.0
+                    ),
+                    "Target": round(float(target), 3) if target != "N/A" else 0.0,
+                    "Stop Loss": (
+                        round(float(stop), 3) if stop != "N/A" else 0.0
+                    ),
+                    "PnL": round(pnl, 2),
+                })
+
+        # حفظ النتيجة في ملف JSON مستقل لكل استراتيجية
+        with open(json_output_name, "w", encoding="utf-8") as jf:
+            json.dump(open_trades, jf, ensure_ascii=False, indent=2)
+
+        print(
+            f"  └─ 🟢 Successfully saved {len(open_trades)} OPEN trade(s) to"
+            f" {json_output_name}"
+        )
+
+    except Exception as e:
+        print(f"  └─ ❌ Error processing {filename}: {e}")
 
 
-def main():
+def aggregate_and_notify():
+    """تجميع كافة الصفقات من ملفات الـ JSON وإرسال إشعار موحد للتليجرام"""
+    all_signals = []
+
+    # قراءة كل ملفات الـ JSON الناتجة
+    for file in os.listdir("."):
+        if file.startswith("output_") and file.endswith(".json"):
+            try:
+                with open(file, "r", encoding="utf-8") as jf:
+                    data = json.load(jf)
+                    all_signals.extend(data)
+                os.remove(file)  # تنظيف الملفات المؤقتة بعد القراءة
+            except Exception as e:
+                print(f"⚠️ Error reading {file}: {e}")
+
     today_str = datetime.date.today().strftime("%Y-%m-%d")
-    print(f"🚀 Starting EGX Multi-Strategy Scan ({today_str})...\n")
 
-    all_open_signals = []
-
-    for filename, strat_name in TXT_FILES:
-        signals = run_txt_script(filename, strat_name)
-        all_open_signals.extend(signals)
-
-    if not all_open_signals:
+    if not all_signals:
         msg = f"📊 <b>EGX Market Scan ({today_str})</b>\n\nNo active OPEN signals found today."
         print("\n" + msg)
         send_telegram_message(msg)
         return
 
+    # صياغة رسالة التليجرام المجمعة
     msg_lines = [
         "🚨 <b>EGX ALL STRATEGIES - ACTIVE SIGNALS</b> 🚨",
         f"📅 <i>Date: {today_str}</i>",
-        f"🌐 Total Active Signals: <b>{len(all_open_signals)}</b>\n",
+        f"🌐 Total Active Signals: <b>{len(all_signals)}</b>\n",
         "========================================",
     ]
 
-    for sig in all_open_signals:
+    for sig in all_signals:
         pnl_val = sig["PnL"]
         pnl_emoji = "🟢" if pnl_val >= 0 else "🔴"
 
@@ -309,8 +240,19 @@ def main():
 
     final_msg = "\n".join(msg_lines)
     print("\n" + final_msg)
-
     send_telegram_message(final_msg)
+
+
+def main():
+    print("🚀 Starting EGX Multi-Strategy Execution & JSON Logging...\n")
+
+    # 1. تشغيل الفحص واستخراج الصفقات لكل استراتيجية على حدة
+    for filename, strat_name in TXT_FILES:
+        process_and_save_strategy(filename, strat_name)
+
+    # 2. تجميع كل النتائج وإرسال التنبيه
+    print("\n📦 Aggregating all results and sending notification...")
+    aggregate_and_notify()
 
 
 if __name__ == "__main__":

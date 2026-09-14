@@ -1,3 +1,4 @@
+
 """
 ================================================================================
 BROADENING BOTTOMS BACKTESTER & SCANNER
@@ -238,7 +239,7 @@ class BroadeningBottomDetector:
 
 
 # ==============================================================================
-# 3. BACKTEST ENGINE WITH NEW COLUMNS STRUCTURE
+# 3. BACKTEST ENGINE WITH REAL OPEN POSITIONS DETECTION
 # ==============================================================================
 
 def run_backtest_on_stock(
@@ -293,7 +294,7 @@ def run_backtest_on_stock(
                     'Entry Price': entry_price,
                     'Target': target_p6,
                     'Stop Loss': stop_loss,
-                    'Exit Date': "",  # يترك فارغاً إذا كانت الصفقة مفتوحة
+                    'Exit Date': None,  # يترك فارغاً حقيقياً للصفقة المفتوحة
                     'Current Price': latest_close_price
                 })
                 i += step_size
@@ -316,11 +317,14 @@ def run_backtest_on_stock(
                     exit_date = date_idx
                     break
 
-            # معالجة الصفقات المفتوحة والمغلقة
+            # معالجة الصفقات:
+            # إذا لم تضرب الهدف أو الوقف، وتصل للحظة الحالية (البيانات لم تنتهِ بعد أو انتهت مدة max_holding_bars ولم تخرج)
             if status is None:
                 if (entry_idx + 1 + len(future_df)) >= len(df):
-                    exit_date_str = ""  # يترك فارغاً إذا كانت الصفقة لا تزال مفتوحة
+                    # الصفقة مستمرة حتى اليوم ولم تكتمل مدتها أو لم تضرب الهدف/الوقف
+                    exit_date_str = None
                 else:
+                    # اكتملت مدة الاحتفاظ max_holding_bars دون ضرب هدف أو وقف (إغلاق بسبب الزمن حسب أصل الكود)
                     exit_date_str = future_df.index[-1].strftime('%Y-%m-%d')
             else:
                 exit_date_str = exit_date.strftime('%Y-%m-%d')

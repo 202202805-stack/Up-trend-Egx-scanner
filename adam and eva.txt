@@ -606,7 +606,7 @@ class Backtester:
                     self._simulate_trade(df, ticker, p)
 
             except Exception as e:
-                print(f'    -> Error processing {ticker}: {e}')
+                print(f'     -> Error processing {ticker}: {e}')
 
     def _simulate_trade(self, df: pd.DataFrame, ticker: str, p: AdamEvePattern):
         entry_idx = p.breakout_index
@@ -619,6 +619,7 @@ class Backtester:
         stop_loss_price = p.stop_loss
 
         exit_date = None
+        status = 'Open'
         current_price = df['Close'].iloc[-1]
 
         for i in range(entry_idx + 1, len(df)):
@@ -628,9 +629,11 @@ class Backtester:
 
             if current_low <= stop_loss_price:
                 exit_date = c_date
+                status = 'Loss'
                 break
             elif current_high >= target_price:
                 exit_date = c_date
+                status = 'Win'
                 break
 
         # If exit_date is None -> Trade is still OPEN -> Exit Date remains empty ("")
@@ -644,6 +647,7 @@ class Backtester:
             'Stop Loss': round(float(stop_loss_price), 2),
             'Exit Date': exit_date_str,
             'Current Price': round(float(current_price), 2),
+            'Status': status,
         })
 
     def export_to_excel(self, filename: str = 'EGX_Adam_Eve_Matched_Format.xlsx'):
@@ -681,7 +685,7 @@ class Backtester:
 
         align_center = Alignment(horizontal='center', vertical='center')
 
-        # Updated Header Layout (7 Requested Columns)
+        # Updated Header Layout (8 Columns)
         columns = [
             'Stock Name',
             'Entry Date',
@@ -689,7 +693,8 @@ class Backtester:
             'Target',
             'Stop Loss',
             'Exit Date',
-            'Current Price'
+            'Current Price',
+            'Status'
         ]
         ws.append(columns)
 
@@ -701,7 +706,7 @@ class Backtester:
 
         # Append Data
         for r_idx, row in trades_df.iterrows():
-            row_data = list(row)
+            row_data = [row[col] for col in columns]
             ws.append(row_data)
             row_num = ws.max_row
 
@@ -726,6 +731,7 @@ class Backtester:
             'E': 15,  # Stop Loss
             'F': 16,  # Exit Date
             'G': 16,  # Current Price
+            'H': 14,  # Status
         }
         for col_letter, width in col_widths.items():
             ws.column_dimensions[col_letter].width = width

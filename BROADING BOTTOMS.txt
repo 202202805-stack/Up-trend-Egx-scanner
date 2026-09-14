@@ -1,11 +1,3 @@
-
-"""
-================================================================================
-BROADENING BOTTOMS BACKTESTER & SCANNER
-(1-YEAR DATA + TRADINGVIEW LIVE + DYNAMIC P6 TARGET + OPEN POSITIONS + STATUS)
-================================================================================
-"""
-
 import datetime
 import math
 import os
@@ -511,6 +503,24 @@ if __name__ == "__main__":
 
         format_excel_file(excel_filename)
         
+        # ==========================================================
+        # طباعة النتائج مباشرة في الـ Output / Terminal
+        # ==========================================================
+        print("\n" + "=" * 80)
+        print("🎯 SCAN & BACKTEST RESULTS SUMMARY")
+        print("=" * 80)
+        
+        open_trades = df_trades[df_trades['Status'] == 'Open']
+        
+        if not open_trades.empty:
+            print(f"\n[!] Active / Open Positions Found ({len(open_trades)}):")
+            print(open_trades[['Stock Name', 'Entry Date', 'Entry Price', 'Target', 'Stop Loss', 'Current Price', 'Status']].to_string(index=False))
+        else:
+            print("\n[!] No active 'Open' positions at the moment. Showing latest completed trades:")
+            print(df_trades.tail(10)[['Stock Name', 'Entry Date', 'Entry Price', 'Target', 'Stop Loss', 'Exit Date', 'Status']].to_string(index=False))
+            
+        print("\n" + "=" * 80)
+
         if COLAB_ENV:
             files.download(excel_filename)
     else:

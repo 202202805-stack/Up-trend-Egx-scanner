@@ -64,7 +64,7 @@ def fetch_tradingview_live_data(tickers: List[str]) -> dict:
                         "Volume": float(vals[5]) if vals[5] is not None else 0.0
                     }
     except Exception as e:
-        print(f"   [TV Warning] Could not fetch live data from TradingView: {e}")
+        print(f"    [TV Warning] Could not fetch live data from TradingView: {e}")
 
     return tv_data
 
@@ -619,44 +619,31 @@ class Backtester:
         stop_loss_price = p.stop_loss
 
         exit_date = None
-        exit_price = None
-        is_open = False
+        current_price = df['Close'].iloc[-1]
 
         for i in range(entry_idx + 1, len(df)):
             current_high = df['High'].iloc[i]
             current_low = df['Low'].iloc[i]
-            current_date = df.index[i]
+            c_date = df.index[i]
 
             if current_low <= stop_loss_price:
-                exit_date = current_date
-                exit_price = stop_loss_price
+                exit_date = c_date
                 break
             elif current_high >= target_price:
-                exit_date = current_date
-                exit_price = target_price
+                exit_date = c_date
                 break
 
-        # Handle Open Positions if neither Stop Loss nor Target was hit
-        if exit_date is None:
-            is_open = True
-            exit_date_str = "Open Position"
-            exit_price = df['Close'].iloc[-1]
-            status = 'Open'
-        else:
-            exit_date_str = exit_date.strftime('%Y-%m-%d')
-            return_pct = ((exit_price - entry_price) / entry_price) * 100
-            status = 'Win' if return_pct > 0 else 'Loss'
-
-        return_pct = ((exit_price - entry_price) / entry_price) * 100
+        # If exit_date is None -> Trade is still OPEN -> Exit Date remains empty ("")
+        exit_date_str = exit_date.strftime('%Y-%m-%d') if exit_date else ""
 
         self.trades.append({
             'Stock Name': ticker,
             'Entry Date': entry_date.strftime('%Y-%m-%d'),
             'Entry Price': round(float(entry_price), 2),
+            'Target': round(float(target_price), 2),
+            'Stop Loss': round(float(stop_loss_price), 2),
             'Exit Date': exit_date_str,
-            'Exit Price': round(float(exit_price), 2),
-            'Win Rate': round(return_pct / 100.0, 4),  # Decimal for Excel %
-            'Status': status,
+            'Current Price': round(float(current_price), 2),
         })
 
     def export_to_excel(self, filename: str = 'EGX_Adam_Eve_Matched_Format.xlsx'):
@@ -683,16 +670,6 @@ class Backtester:
         # Visual Formatting Styles
         header_font = Font(name='Calibri', size=11, bold=True, color='FFFFFF')
         header_fill = PatternFill(start_color='1B365D', end_color='1B365D', fill_type='solid')
-
-        win_fill = PatternFill(start_color='E2EFDA', end_color='E2EFDA', fill_type='solid')
-        win_font = Font(name='Calibri', size=11, bold=True, color='375623')
-
-        loss_fill = PatternFill(start_color='FCE4D6', end_color='FCE4D6', fill_type='solid')
-        loss_font = Font(name='Calibri', size=11, bold=True, color='C65911')
-
-        open_fill = PatternFill(start_color='D9E1F2', end_color='D9E1F2', fill_type='solid')
-        open_font = Font(name='Calibri', size=11, bold=True, color='1F4E78')
-
         normal_font = Font(name='Calibri', size=11, bold=False, color='000000')
 
         thin_border = Border(
@@ -704,8 +681,16 @@ class Backtester:
 
         align_center = Alignment(horizontal='center', vertical='center')
 
-        # Add Headers (7 Columns)
-        columns = ['Stock Name', 'Entry Date', 'Entry Price', 'Exit Date', 'Exit Price', 'Win Rate', 'Status']
+        # Updated Header Layout (7 Requested Columns)
+        columns = [
+            'Stock Name',
+            'Entry Date',
+            'Entry Price',
+            'Target',
+            'Stop Loss',
+            'Exit Date',
+            'Current Price'
+        ]
         ws.append(columns)
 
         for col_idx in range(1, len(columns) + 1):
@@ -728,32 +713,19 @@ class Backtester:
 
                 col_name = columns[c_idx - 1]
 
-                if col_name in ['Entry Price', 'Exit Price']:
+                # Format Number/Price columns
+                if col_name in ['Entry Price', 'Target', 'Stop Loss', 'Current Price']:
                     cell.number_format = '#,##0.00'
-
-                elif col_name == 'Win Rate':
-                    cell.number_format = '0.00%'
-
-                elif col_name == 'Status':
-                    if cell.value == 'Win':
-                        cell.fill = win_fill
-                        cell.font = win_font
-                    elif cell.value == 'Loss':
-                        cell.fill = loss_fill
-                        cell.font = loss_font
-                    elif cell.value == 'Open':
-                        cell.fill = open_fill
-                        cell.font = open_font
 
         # Column Widths
         col_widths = {
             'A': 18,  # Stock Name
             'B': 16,  # Entry Date
             'C': 15,  # Entry Price
-            'D': 18,  # Exit Date
-            'E': 15,  # Exit Price
-            'F': 16,  # Win Rate
-            'G': 15,  # Status
+            'D': 15,  # Target
+            'E': 15,  # Stop Loss
+            'F': 16,  # Exit Date
+            'G': 16,  # Current Price
         }
         for col_letter, width in col_widths.items():
             ws.column_dimensions[col_letter].width = width
@@ -763,7 +735,7 @@ class Backtester:
             wb.save(filename)
             print('\n========================================================')
             print('BACKTEST COMPLETED SUCCESSFULLY!')
-            print(f'Excel File Saved with Exact Image Formatting: {filename}')
+            print(f'Excel File Saved with Exact Required Format: {filename}')
             print('========================================================')
         except PermissionError:
             alt_filename = f"EGX_Adam_Eve_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"

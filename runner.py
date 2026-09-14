@@ -1,12 +1,12 @@
 import datetime
 import os
 import requests
+import pandas as pd
 
 # جلب توكن التليجرام والآيدي من GitHub Secrets
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# قائمة بجميع ملفات التكست واسم كل استراتيجية
 TXT_FILES = [
     ("BROADING BOTTOMS.txt", "Broadening Bottoms"),
     ("FLAGS.txt", "Flags"),
@@ -16,7 +16,6 @@ TXT_FILES = [
     ("pipe bottom.txt", "Pipe Bottom"),
     ("tripple bottom.txt", "Triple Bottom"),
 ]
-
 
 def send_telegram_message(message: str):
     """إرسال التنبيهات عبر التليجرام"""
@@ -39,46 +38,99 @@ def send_telegram_message(message: str):
     except Exception as e:
         print(f"⚠️ Exception sending Telegram message: {e}")
 
+def extract_trades_from_scope(local_scope, strategy_name):
+    """البحث الذكي عن كافة الصفقات المفتوحة بداخل النطاق المعزول بعد تنفيذ الملف"""
+    extracted_open_trades = []
+
+    # 1. محاولة استدعاء الدوال المشهورة إن وجدت
+    raw_trades = None
+    for func_name in ["run_full_backtest", "run_full_scan", "main", "scan_market"]:
+        if func_name in local_scope and callable(local_scope[func_name]):
+            try:
+                res = local_scope[func_name]()
+                if res and isinstance(res, (list, pd.DataFrame)):
+                    raw_trades = res
+                    break
+            except Exception:
+                pass
+
+    # 2. إذا لم ترجع الدالة شيئاً، يتم البحث عن المتغيرات المخزنة في local_scope
+    if raw_trades is None:
+        for var_name in ["all_trades", "trades", "trades_df", "results", "open_positions", "df_results"]:
+            if var_name in local_scope:
+                raw_trades = local_scope[var_name]
+                break
+
+    # تحويل النتائج إلى قائمة من المعاجم (List of Dicts)
+    trades_list = []
+    if isinstance(raw_trades, pd.DataFrame):
+        trades_list = raw_trades.to_dict(orient="records")
+    elif isinstance(raw_trades, list):
+        trades_list = raw_trades
+
+    # 3. تصفية الصفقات المفتوحة مرنًا لجميع صيغ الكلمات والأسماء
+    for t in trades_list:
+        if not isinstance(t, dict):
+            continue
+
+        # جلب حالة الصفقة بغض النظر عن اسم العمود
+        status = str(
+            t.get("Status") or 
+            t.get("Trade Status") or 
+            t.get("Position Status") or 
+            t.get("status") or ""
+        ).strip().upper()
+
+        if status in ["OPEN", "ACTIVE", "مفتوحة", "مستمرة"]:
+            # توحيد المفاتيح لاستخدامها في رسالة التليجرام
+            stock = t.get("Stock Name") or t.get("Ticker") or t.get("Stock") or t.get("Symbol") or "N/A"
+            entry_d = t.get("Entry Date") or t.get("Date") or "N/A"
+            entry_p = t.get("Entry Price") or t.get("Buy Price") or 0.0
+            curr_p = t.get("Current Price") or t.get("Last Price") or entry_p
+            target = t.get("Target Price") or t.get("Target") or 0.0
+            stop = t.get("Stop Loss") or t.get("Stop") or 0.0
+            
+            # حساب نسبة الربح/الخسارة
+            pnl = t.get("PnL %") or t.get("Unrealized PnL %") or t.get("Return %") or t.get("Win Rate") or 0.0
+            if isinstance(pnl, float) and abs(pnl) <= 1.0:
+                pnl = pnl * 100
+
+            extracted_open_trades.append({
+                "Strategy": strategy_name,
+                "Stock": str(stock).replace(".CA", ""),
+                "Entry Date": str(entry_d)[:10],
+                "Entry Price": round(float(entry_p), 2) if entry_p else 0.0,
+                "Current Price": round(float(curr_p), 2) if curr_p else 0.0,
+                "Target": round(float(target), 2) if target else 0.0,
+                "Stop Loss": round(float(stop), 2) if stop else 0.0,
+                "PnL": round(float(pnl), 2) if pnl else 0.0,
+            })
+
+    return extracted_open_trades
 
 def run_txt_script(filename: str, strategy_name: str):
-    """قراءة وتحديث تشغيل ملف الـ txt واستخراج الصفقات المفتوحة"""
     if not os.path.exists(filename):
         print(f"⚠️ File not found: {filename}")
         return []
 
     print(f"🔍 Processing: {filename} ({strategy_name})...")
-
-    # بيئة معزولة لتشغيل الكود بداخلها
     local_scope = {}
 
     try:
         with open(filename, "r", encoding="utf-8") as f:
             code = f.read()
 
-        # تنفيذ كود الملف داخل النطاق المعزول
+        # تنفيذ كود الملف
         exec(code, local_scope)
 
-        trades = []
-        # البحث عن دالة الفحص المتاحة بداخل ملف الـ txt
-        if "run_full_backtest" in local_scope:
-            trades = local_scope["run_full_backtest"]()
-        elif "run_full_scan" in local_scope:
-            trades = local_scope["run_full_scan"]()
-
-        open_trades = []
-        if trades:
-            for t in trades:
-                # تصفية الصفقات المفتوحة فقط
-                if isinstance(t, dict) and t.get("Status") == "Open":
-                    t["Strategy"] = strategy_name
-                    open_trades.append(t)
-
+        # استخراج الصفقات المفتوحة
+        open_trades = extract_trades_from_scope(local_scope, strategy_name)
+        print(f"  └─ 🟢 Found {len(open_trades)} OPEN position(s).")
         return open_trades
 
     except Exception as e:
         print(f"⚠️ Error executing {filename}: {e}")
         return []
-
 
 def main():
     today_str = datetime.date.today().strftime("%Y-%m-%d")
@@ -86,19 +138,16 @@ def main():
 
     all_open_signals = []
 
-    # المرور على الملفات السبعة واحدًا تلو الآخر
     for filename, strat_name in TXT_FILES:
         signals = run_txt_script(filename, strat_name)
         all_open_signals.extend(signals)
 
-    # إذا لم تكن هناك أي صفقة مفتوحة
     if not all_open_signals:
-        msg = f"📊 <b>EGX Market Scan ({today_str})</b>\n\nNo active OPEN signals found across all strategies today."
-        print(msg)
+        msg = f"📊 <b>EGX Market Scan ({today_str})</b>\n\nNo active OPEN signals found across all 7 strategies today."
+        print("\n" + msg)
         send_telegram_message(msg)
         return
 
-    # صياغة رسالة التليجرام المجمعة
     msg_lines = [
         f"🚨 <b>EGX ALL STRATEGIES - ACTIVE SIGNALS</b> 🚨",
         f"📅 <i>Date: {today_str}</i>",
@@ -107,25 +156,17 @@ def main():
     ]
 
     for sig in all_open_signals:
-        stock = str(sig.get("Stock Name", "N/A")).replace(".CA", "")
-        strat = sig.get("Strategy", "N/A")
-        entry_d = sig.get("Entry Date", "N/A")
-        entry_p = sig.get("Entry Price", 0.0)
-        curr_p = sig.get("Current Price", 0.0)
-        target = sig.get("Target Price", 0.0)
-        stop = sig.get("Stop Loss", 0.0)
-        pnl = sig.get("Win Rate", 0.0) * 100
-
-        pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+        pnl_val = sig["PnL"]
+        pnl_emoji = "🟢" if pnl_val >= 0 else "🔴"
 
         card = (
-            f"🎯 <b>Strategy: {strat}</b>\n"
-            f"📈 <b>Stock: #{stock}</b>\n"
-            f"📅 Entry Date: {entry_d}\n"
-            f"💵 Entry Price: <b>{entry_p} EGP</b>\n"
-            f"📊 Current Price: {curr_p} EGP ({pnl_emoji} {pnl:+.2f}%)\n"
-            f"🎯 Target: <b>{target} EGP</b>\n"
-            f"🛑 Stop Loss: <b>{stop} EGP</b>\n"
+            f"🎯 <b>Strategy: {sig['Strategy']}</b>\n"
+            f"📈 <b>Stock: #{sig['Stock']}</b>\n"
+            f"📅 Entry Date: {sig['Entry Date']}\n"
+            f"💵 Entry Price: <b>{sig['Entry Price']} EGP</b>\n"
+            f"📊 Current Price: {sig['Current Price']} EGP ({pnl_emoji} {pnl_val:+.2f}%)\n"
+            f"🎯 Target: <b>{sig['Target']} EGP</b>\n"
+            f"🛑 Stop Loss: <b>{sig['Stop Loss']} EGP</b>\n"
             "----------------------------------------"
         )
         msg_lines.append(card)
@@ -133,9 +174,7 @@ def main():
     final_msg = "\n".join(msg_lines)
     print("\n" + final_msg)
 
-    # إرسال الرسالة إلى تليجرام
     send_telegram_message(final_msg)
-
 
 if __name__ == "__main__":
     main()

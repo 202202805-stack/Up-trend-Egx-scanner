@@ -39,41 +39,41 @@ def send_telegram_message(message: str):
         print(f"⚠️ Exception sending Telegram message: {e}")
 
 def extract_trades_from_scope(local_scope, strategy_name):
-    """البحث الذكي عن كافة الصفقات المفتوحة بداخل النطاق المعزول بعد تنفيذ الملف"""
+    """البحث الشامل والدقيق عن الصفقات المفتوحة بداخل كل ملف"""
     extracted_open_trades = []
 
-    # 1. محاولة استدعاء الدوال المشهورة إن وجدت
     raw_trades = None
-    for func_name in ["run_full_backtest", "run_full_scan", "main", "scan_market"]:
-        if func_name in local_scope and callable(local_scope[func_name]):
-            try:
-                res = local_scope[func_name]()
-                if res and isinstance(res, (list, pd.DataFrame)):
-                    raw_trades = res
-                    break
-            except Exception:
-                pass
 
-    # 2. إذا لم ترجع الدالة شيئاً، يتم البحث عن المتغيرات المخزنة في local_scope
+    # 1. البحث في المتغيرات المخزنة مباشرة في الذاكرة بعد التنفيذ
+    for var_name in ["all_trades", "trades", "trades_df", "results", "open_positions", "df_results", "open_trades"]:
+        if var_name in local_scope and local_scope[var_name] is not None:
+            raw_trades = local_scope[var_name]
+            break
+
+    # 2. تشغيل دالة الفحص إن لم تكن النتائج مخزنة في متغير جاهز
     if raw_trades is None:
-        for var_name in ["all_trades", "trades", "trades_df", "results", "open_positions", "df_results"]:
-            if var_name in local_scope:
-                raw_trades = local_scope[var_name]
-                break
+        for func_name in ["run_full_backtest", "run_full_scan", "main", "scan_market"]:
+            if func_name in local_scope and callable(local_scope[func_name]):
+                try:
+                    res = local_scope[func_name]()
+                    if res is not None:
+                        raw_trades = res
+                        break
+                except Exception:
+                    pass
 
-    # تحويل النتائج إلى قائمة من المعاجم (List of Dicts)
+    # تحويل النتائج إلى قائمة
     trades_list = []
-    if isinstance(raw_trades, pd.DataFrame):
+    if hasattr(raw_trades, "to_dict"):  # إذا كانت DataFrame
         trades_list = raw_trades.to_dict(orient="records")
     elif isinstance(raw_trades, list):
         trades_list = raw_trades
 
-    # 3. تصفية الصفقات المفتوحة مرنًا لجميع صيغ الكلمات والأسماء
+    # 3. تصفية واستخراج الصفقات المفتوحة
     for t in trades_list:
         if not isinstance(t, dict):
             continue
 
-        # جلب حالة الصفقة بغض النظر عن اسم العمود
         status = str(
             t.get("Status") or 
             t.get("Trade Status") or 
@@ -82,17 +82,15 @@ def extract_trades_from_scope(local_scope, strategy_name):
         ).strip().upper()
 
         if status in ["OPEN", "ACTIVE", "مفتوحة", "مستمرة"]:
-            # توحيد المفاتيح لاستخدامها في رسالة التليجرام
             stock = t.get("Stock Name") or t.get("Ticker") or t.get("Stock") or t.get("Symbol") or "N/A"
             entry_d = t.get("Entry Date") or t.get("Date") or "N/A"
             entry_p = t.get("Entry Price") or t.get("Buy Price") or 0.0
             curr_p = t.get("Current Price") or t.get("Last Price") or entry_p
             target = t.get("Target Price") or t.get("Target") or 0.0
             stop = t.get("Stop Loss") or t.get("Stop") or 0.0
-            
-            # حساب نسبة الربح/الخسارة
             pnl = t.get("PnL %") or t.get("Unrealized PnL %") or t.get("Return %") or t.get("Win Rate") or 0.0
-            if isinstance(pnl, float) and abs(pnl) <= 1.0:
+
+            if isinstance(pnl, (float, int)) and abs(pnl) <= 1.0:
                 pnl = pnl * 100
 
             extracted_open_trades.append({

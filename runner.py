@@ -1,5 +1,6 @@
 import datetime
 import os
+import glob
 import requests
 import pandas as pd
 
@@ -38,71 +39,91 @@ def send_telegram_message(message: str):
     except Exception as e:
         print(f"⚠️ Exception sending Telegram message: {e}")
 
-def extract_trades_from_scope(local_scope, strategy_name):
-    """البحث الشامل والدقيق عن الصفقات المفتوحة بداخل كل ملف"""
+def extract_trades(local_scope, strategy_name, excel_files_before):
+    """استخراج الصفقات المفتوحة من ملف Excel المنشأ حديثاً أو من الذاكرة"""
     extracted_open_trades = []
+    df_result = None
 
-    raw_trades = None
+    # 1. البحث عن ملف Excel الجديد الذي تم إنشاؤه أثناء تشغيل هذا الملف فقط
+    excel_files_after = set(glob.glob("*.xlsx"))
+    new_excel_files = list(excel_files_after - excel_files_before)
 
-    # 1. البحث في المتغيرات المخزنة مباشرة في الذاكرة بعد التنفيذ
-    for var_name in ["all_trades", "trades", "trades_df", "results", "open_positions", "df_results", "open_trades"]:
-        if var_name in local_scope and local_scope[var_name] is not None:
-            raw_trades = local_scope[var_name]
+    if new_excel_files:
+        latest_file = max(new_excel_files, key=os.path.getmtime)
+        try:
+            df_result = pd.read_excel(latest_file)
+            print(f"  └─ 📁 Read results from generated Excel: {latest_file}")
+        except Exception as e:
+            print(f"  └─ ⚠️ Could not read Excel {latest_file}: {e}")
+
+    # 2. إذا لم يجد ملف Excel جديد، يبحث في متغيرات الذاكرة
+    if df_result is None or df_result.empty:
+        for var_name in ["all_trades", "trades", "trades_df", "results", "open_positions", "df_results", "open_trades"]:
+            if var_name in local_scope and local_scope[var_name] is not None:
+                val = local_scope[var_name]
+                if isinstance(val, pd.DataFrame):
+                    df_result = val
+                elif isinstance(val, list):
+                    df_result = pd.DataFrame(val)
+                break
+
+    if df_result is None or df_result.empty:
+        return []
+
+    # توحيد أسماء الأعمدة لتسهيل البحث
+    df_result.columns = [str(c).strip().title() for c in df_result.columns]
+
+    # العثور على عمود الحالة (Status)
+    status_col = None
+    for col in ["Status", "Trade Status", "Position Status", "State", "Trade_Status", "Position_Status"]:
+        if col in df_result.columns:
+            status_col = col
             break
 
-    # 2. تشغيل دالة الفحص إن لم تكن النتائج مخزنة في متغير جاهز
-    if raw_trades is None:
-        for func_name in ["run_full_backtest", "run_full_scan", "main", "scan_market"]:
-            if func_name in local_scope and callable(local_scope[func_name]):
-                try:
-                    res = local_scope[func_name]()
-                    if res is not None:
-                        raw_trades = res
-                        break
-                except Exception:
-                    pass
+    if not status_col:
+        return []
 
-    # تحويل النتائج إلى قائمة
-    trades_list = []
-    if hasattr(raw_trades, "to_dict"):  # إذا كانت DataFrame
-        trades_list = raw_trades.to_dict(orient="records")
-    elif isinstance(raw_trades, list):
-        trades_list = raw_trades
+    # تصفية الصفقات المفتوحة فقط
+    mask = df_result[status_col].astype(str).str.upper().str.contains("OPEN|ACTIVE|مفتوحة|مستمرة")
+    open_df = df_result[mask]
 
-    # 3. تصفية واستخراج الصفقات المفتوحة
-    for t in trades_list:
-        if not isinstance(t, dict):
-            continue
+    for _, row in open_df.iterrows():
+        # دالة مساعدة لجلب أحدث قيمة من عدة مسميات للأعمدة
+        def get_val(keys, default=0.0):
+            for k in keys:
+                for col in df_result.columns:
+                    if k.lower() in col.lower():
+                        val = row.get(col)
+                        if pd.notnull(val):
+                            return val
+            return default
 
-        status = str(
-            t.get("Status") or 
-            t.get("Trade Status") or 
-            t.get("Position Status") or 
-            t.get("status") or ""
-        ).strip().upper()
+        stock = get_val(["Stock Name", "Ticker", "Stock", "Symbol"], "N/A")
+        entry_d = get_val(["Entry Date", "Date", "Entry_Date"], "N/A")
+        entry_p = get_val(["Entry Price", "Buy Price", "Entry_Price", "Price"], 0.0)
+        curr_p = get_val(["Current Price", "Last Price", "Close", "Current_Price"], entry_p)
+        target = get_val(["Target Price", "Target", "Target_Price"], 0.0)
+        stop = get_val(["Stop Loss", "Stop", "Stop_Loss"], 0.0)
+        pnl = get_val(["PnL %", "Unrealized PnL %", "Return %", "Win Rate", "Pnl"], 0.0)
 
-        if status in ["OPEN", "ACTIVE", "مفتوحة", "مستمرة"]:
-            stock = t.get("Stock Name") or t.get("Ticker") or t.get("Stock") or t.get("Symbol") or "N/A"
-            entry_d = t.get("Entry Date") or t.get("Date") or "N/A"
-            entry_p = t.get("Entry Price") or t.get("Buy Price") or 0.0
-            curr_p = t.get("Current Price") or t.get("Last Price") or entry_p
-            target = t.get("Target Price") or t.get("Target") or 0.0
-            stop = t.get("Stop Loss") or t.get("Stop") or 0.0
-            pnl = t.get("PnL %") or t.get("Unrealized PnL %") or t.get("Return %") or t.get("Win Rate") or 0.0
-
-            if isinstance(pnl, (float, int)) and abs(pnl) <= 1.0:
+        # تحويل النسبة المئوية إذا كانت كسرية
+        try:
+            pnl = float(pnl)
+            if abs(pnl) <= 1.0 and pnl != 0.0:
                 pnl = pnl * 100
+        except Exception:
+            pnl = 0.0
 
-            extracted_open_trades.append({
-                "Strategy": strategy_name,
-                "Stock": str(stock).replace(".CA", ""),
-                "Entry Date": str(entry_d)[:10],
-                "Entry Price": round(float(entry_p), 2) if entry_p else 0.0,
-                "Current Price": round(float(curr_p), 2) if curr_p else 0.0,
-                "Target": round(float(target), 2) if target else 0.0,
-                "Stop Loss": round(float(stop), 2) if stop else 0.0,
-                "PnL": round(float(pnl), 2) if pnl else 0.0,
-            })
+        extracted_open_trades.append({
+            "Strategy": strategy_name,
+            "Stock": str(stock).replace(".CA", ""),
+            "Entry Date": str(entry_d)[:10],
+            "Entry Price": round(float(entry_p), 2) if entry_p else 0.0,
+            "Current Price": round(float(curr_p), 2) if curr_p else 0.0,
+            "Target": round(float(target), 2) if target else 0.0,
+            "Stop Loss": round(float(stop), 2) if stop else 0.0,
+            "PnL": round(float(pnl), 2),
+        })
 
     return extracted_open_trades
 
@@ -114,15 +135,18 @@ def run_txt_script(filename: str, strategy_name: str):
     print(f"🔍 Processing: {filename} ({strategy_name})...")
     local_scope = {}
 
+    # حصر ملفات Excel الموجودة قبل تشغيل الكود الحالي
+    excel_files_before = set(glob.glob("*.xlsx"))
+
     try:
         with open(filename, "r", encoding="utf-8") as f:
             code = f.read()
 
-        # تنفيذ كود الملف
+        # تنفيذ الملف
         exec(code, local_scope)
 
-        # استخراج الصفقات المفتوحة
-        open_trades = extract_trades_from_scope(local_scope, strategy_name)
+        # استخراج الصفقات المفتوحة بمرونة عالية
+        open_trades = extract_trades(local_scope, strategy_name, excel_files_before)
         print(f"  └─ 🟢 Found {len(open_trades)} OPEN position(s).")
         return open_trades
 

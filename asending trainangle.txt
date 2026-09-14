@@ -1,3 +1,4 @@
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  EGX ASCENDING TRIANGLE SCANNER WITH TRADINGVIEW LIVE DATA & OPEN POSITIONS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -119,6 +120,10 @@ class TrianglePattern:
     apex_idx: float = -1.0
     start_date: str = ""
     breakout_date: str = ""
+    entry_price: float = 0.0
+    target_price: float = 0.0
+    stop_loss: float = 0.0
+    current_price: float = 0.0
     exit_date: str = ""
     pnl_pct: float = 0.0
     status: str = "Open"  # Win, Loss, Open
@@ -376,11 +381,12 @@ class AscendingTriangleEngine:
 
     def _simulate_trade(
         self, df: pd.DataFrame, breakout_idx: int
-    ) -> Tuple[str, str, float]:
-        """محاكاة تداول الصفقة لتحديد تاريخ الخروج، حالة الصفقة (Win/Loss/Open)، والنسبة المئوية للربح/الخسارة"""
-        entry_price = df["close"].iloc[breakout_idx]
-        target_price = entry_price * 1.08  # هدف 8%
-        stop_loss = entry_price * 0.95  # وقف خسارة 5%
+    ) -> Tuple[str, str, float, float, float, float]:
+        """محاكاة الصفقة لحساب التواريخ، المستويات السعرية، والسعر الحالي"""
+        entry_price = round(float(df["close"].iloc[breakout_idx]), 2)
+        target_price = round(entry_price * 1.08, 2)  # هدف 8%
+        stop_loss = round(entry_price * 0.95, 2)  # وقف خسارة 5%
+        current_price = round(float(df["close"].iloc[-1]), 2)
 
         future_df = df.iloc[breakout_idx + 1 :]
 
@@ -390,16 +396,15 @@ class AscendingTriangleEngine:
 
             if row["high"] >= target_price:
                 pnl = ((target_price - entry_price) / entry_price) * 100
-                return curr_date, "Win", round(pnl, 2)
+                return curr_date, "Win", round(pnl, 2), entry_price, target_price, stop_loss
 
             if row["low"] <= stop_loss:
                 pnl = ((stop_loss - entry_price) / entry_price) * 100
-                return curr_date, "Loss", round(pnl, 2)
+                return curr_date, "Loss", round(pnl, 2), entry_price, target_price, stop_loss
 
-        # إذا استمرت حتى آخر شمعة تكون صفقات مفتوحة Open Position
-        last_close = df["close"].iloc[-1]
-        unrealized_pnl = ((last_close - entry_price) / entry_price) * 100
-        return "Open Position", "Open", round(unrealized_pnl, 2)
+        # إذا كانت الصفقة مفتوحة يترك تاريخ الخروج فارغاً
+        unrealized_pnl = ((current_price - entry_price) / entry_price) * 100
+        return "", "Open", round(unrealized_pnl, 2), entry_price, target_price, stop_loss
 
     def _score_pattern(
         self,
@@ -482,7 +487,8 @@ class AscendingTriangleEngine:
 
                 bo_idx = min(struct["breakout_idx"], len(df) - 1)
                 entry_date = str(df.index[bo_idx]).split(" ")[0]
-                exit_date, status, pnl_pct = self._simulate_trade(df, bo_idx)
+                exit_date, status, pnl_pct, entry_p, target_p, stop_p = self._simulate_trade(df, bo_idx)
+                curr_p = round(float(df["close"].iloc[-1]), 2)
 
                 pattern = TrianglePattern(
                     detected=True,
@@ -495,6 +501,10 @@ class AscendingTriangleEngine:
                     apex_idx=struct["apex_idx"],
                     start_date=str(df.index[start_idx]).split(" ")[0],
                     breakout_date=entry_date,
+                    entry_price=entry_p,
+                    target_price=target_p,
+                    stop_loss=stop_p,
+                    current_price=curr_p,
                     exit_date=exit_date,
                     pnl_pct=pnl_pct,
                     status=status,
@@ -515,248 +525,41 @@ class AscendingTriangleEngine:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 tickers = [
-    "AALR.CA",
-    "ABUK.CA",
-    "ACAMD.CA",
-    "ACAP.CA",
-    "ACGC.CA",
-    "ACTF.CA",
-    "ADCI.CA",
-    "ADIB.CA",
-    "ADPC.CA",
-    "ADRI.CA",
-    "AFDI.CA",
-    "AFMC.CA",
-    "AIDC.CA",
-    "AIFI.CA",
-    "AIH.CA",
-    "AJWA.CA",
-    "ALCN.CA",
-    "ALEX.CA",
-    "ALUM.CA",
-    "AMER.CA",
-    "AMES.CA",
-    "AMIA.CA",
-    "AMII.CA",
-    "AMOC.CA",
-    "AMPI.CA",
-    "APSW.CA",
-    "ARAB.CA",
-    "ARCC.CA",
-    "AREH.CA",
-    "ASCM.CA",
-    "ASPI.CA",
-    "ATLC.CA",
-    "ATQA.CA",
-    "AXPH.CA",
-    "BIDI.CA",
-    "BIGP.CA",
-    "BINV.CA",
-    "BIOC.CA",
-    "BONY.CA",
-    "BTFH.CA",
-    "CAED.CA",
-    "CANA.CA",
-    "CCAP.CA",
-    "CCRS.CA",
-    "CEFM.CA",
-    "CERA.CA",
-    "CFGH.CA",
-    "CICH.CA",
-    "CIEB.CA",
-    "CIRA.CA",
-    "CLHO.CA",
-    "CNFN.CA",
-    "COMI.CA",
-    "COPR.CA",
-    "COSG.CA",
-    "CPCI.CA",
-    "CPME.CA",
-    "CRST.CA",
-    "CSAG.CA",
-    "DAPH.CA",
-    "DCRC.CA",
-    "DEIN.CA",
-    "DGTZ.CA",
-    "DOMT.CA",
-    "DSCW.CA",
-    "DTPP.CA",
-    "EALR.CA",
-    "EASB.CA",
-    "EAST.CA",
-    "EBSC.CA",
-    "ECAP.CA",
-    "EDFM.CA",
-    "EEII.CA",
-    "EFIC.CA",
-    "EFID.CA",
-    "EFIH.CA",
-    "EGAL.CA",
-    "EGAS.CA",
-    "EGBE.CA",
-    "EGCH.CA",
-    "EGREF.CA",
-    "EGSA.CA",
-    "EGTS.CA",
-    "EHDR.CA",
-    "ELAB.CA",
-    "ELEC.CA",
-    "ELKA.CA",
-    "ELNA.CA",
-    "ELSH.CA",
-    "ELWA.CA",
-    "EMFD.CA",
-    "ENGC.CA",
-    "EOSB.CA",
-    "EPCO.CA",
-    "EPPK.CA",
-    "ETEL.CA",
-    "ETRS.CA",
-    "EXPA.CA",
-    "FAIT.CA",
-    "FAITA.CA",
-    "FCMD.CA",
-    "FIRE.CA",
-    "FNAR.CA",
-    "FTNS.CA",
-    "FWRY.CA",
-    "GBCO.CA",
-    "GDWA.CA",
-    "GGCC.CA",
-    "GGRN.CA",
-    "GIHD.CA",
-    "GMCI.CA",
-    "GOUR.CA",
-    "GPIM.CA",
-    "GRCA.CA",
-    "GSSC.CA",
-    "GTEX.CA",
-    "GTHE.CA",
-    "GTWL.CA",
-    "HBCO.CA",
-    "HDBK.CA",
-    "HELI.CA",
-    "HRHO.CA",
-    "IBCT.CA",
-    "ICFC.CA",
-    "ICID.CA",
-    "IDRE.CA",
-    "IEEC.CA",
-    "IFAP.CA",
-    "INEG.CA",
-    "INFI.CA",
-    "IRON.CA",
-    "ISMA.CA",
-    "ISMQ.CA",
-    "ISPH.CA",
-    "JUFO.CA",
-    "KABO.CA",
-    "KORA.CA",
-    "KRDI.CA",
-    "KWIN.CA",
-    "KZPC.CA",
-    "LCSW.CA",
-    "LKGP.CA",
-    "LUTS.CA",
-    "MAAL.CA",
-    "MASR.CA",
-    "MBEG.CA",
-    "MBSC.CA",
-    "MCQE.CA",
-    "MCRO.CA",
-    "MENA.CA",
-    "MEPA.CA",
-    "MFPC.CA",
-    "MFSC.CA",
-    "MHOT.CA",
-    "MICH.CA",
-    "MILS.CA",
-    "MIPH.CA",
-    "MOED.CA",
-    "MOIL.CA",
-    "MOIN.CA",
-    "MOSC.CA",
-    "MPCI.CA",
-    "MPCO.CA",
-    "MPRC.CA",
-    "MTIE.CA",
-    "NAHO.CA",
-    "NARE.CA",
-    "NCCW.CA",
-    "NCGC.CA",
-    "NEDA.CA",
-    "NHPS.CA",
-    "NINH.CA",
-    "NIPH.CA",
-    "OBRI.CA",
-    "OCAP.CA",
-    "OCDI.CA",
-    "OCPH.CA",
-    "ODIN.CA",
-    "OFH.CA",
-    "OIH.CA",
-    "OLFI.CA",
-    "ORAS.CA",
-    "ORHD.CA",
-    "ORWE.CA",
-    "PHAR.CA",
-    "PHDC.CA",
-    "PHGC.CA",
-    "PHTV.CA",
-    "POUL.CA",
-    "PRCL.CA",
-    "PRDC.CA",
-    "PRMH.CA",
-    "QNBE.CA",
-    "RACC.CA",
-    "RAKT.CA",
-    "RAYA.CA",
-    "RKAZ.CA",
-    "RMDA.CA",
-    "RMTV.CA",
-    "ROTO.CA",
-    "RREI.CA",
-    "RTVC.CA",
-    "RUBX.CA",
-    "SAUD.CA",
-    "SCEM.CA",
-    "SCFM.CA",
-    "SCTS.CA",
-    "SDTI.CA",
-    "SEIG.CA",
-    "SIEG.CA",
-    "SIPC.CA",
-    "SKPC.CA",
-    "SMFR.CA",
-    "SNFC.CA",
-    "SPIN.CA",
-    "SPMD.CA",
-    "SUCE.CA",
-    "SUGR.CA",
-    "SVCE.CA",
-    "SWDY.CA",
-    "TALM.CA",
-    "TANM.CA",
-    "TAQA.CA",
-    "TMGH.CA",
-    "TORA.CA",
-    "TWSA.CA",
-    "TYCN.CA",
-    "UBEE.CA",
-    "UEFM.CA",
-    "UEGC.CA",
-    "UNIP.CA",
-    "UNIT.CA",
-    "UPMS.CA",
-    "UTOP.CA",
-    "VALU.CA",
-    "VERT.CA",
-    "VLMR.CA",
-    "VLMRA.CA",
-    "WCDF.CA",
-    "WKOL.CA",
-    "ZEOT.CA",
-    "ZMID.CA",
+    "AALR.CA", "ABUK.CA", "ACAMD.CA", "ACAP.CA", "ACGC.CA", "ACTF.CA", "ADCI.CA",
+    "ADIB.CA", "ADPC.CA", "ADRI.CA", "AFDI.CA", "AFMC.CA", "AIDC.CA", "AIFI.CA",
+    "AIH.CA", "AJWA.CA", "ALCN.CA", "ALEX.CA", "ALUM.CA", "AMER.CA", "AMES.CA",
+    "AMIA.CA", "AMII.CA", "AMOC.CA", "AMPI.CA", "APSW.CA", "ARAB.CA", "ARCC.CA",
+    "AREH.CA", "ASCM.CA", "ASPI.CA", "ATLC.CA", "ATQA.CA", "AXPH.CA", "BIDI.CA",
+    "BIGP.CA", "BINV.CA", "BIOC.CA", "BONY.CA", "BTFH.CA", "CAED.CA", "CANA.CA",
+    "CCAP.CA", "CCRS.CA", "CEFM.CA", "CERA.CA", "CFGH.CA", "CICH.CA", "CIEB.CA",
+    "CIRA.CA", "CLHO.CA", "CNFN.CA", "COMI.CA", "COPR.CA", "COSG.CA", "CPCI.CA",
+    "CPME.CA", "CRST.CA", "CSAG.CA", "DAPH.CA", "DCRC.CA", "DEIN.CA", "DGTZ.CA",
+    "DOMT.CA", "DSCW.CA", "DTPP.CA", "EALR.CA", "EASB.CA", "EAST.CA", "EBSC.CA",
+    "ECAP.CA", "EDFM.CA", "EEII.CA", "EFIC.CA", "EFID.CA", "EFIH.CA", "EGAL.CA",
+    "EGAS.CA", "EGBE.CA", "EGCH.CA", "EGREF.CA", "EGSA.CA", "EGTS.CA", "EHDR.CA",
+    "ELAB.CA", "ELEC.CA", "ELKA.CA", "ELNA.CA", "ELSH.CA", "ELWA.CA", "EMFD.CA",
+    "ENGC.CA", "EOSB.CA", "EPCO.CA", "EPPK.CA", "ETEL.CA", "ETRS.CA", "EXPA.CA",
+    "FAIT.CA", "FAITA.CA", "FCMD.CA", "FIRE.CA", "FNAR.CA", "FTNS.CA", "FWRY.CA",
+    "GBCO.CA", "GDWA.CA", "GGCC.CA", "GGRN.CA", "GIHD.CA", "GMCI.CA", "GOUR.CA",
+    "GPIM.CA", "GRCA.CA", "GSSC.CA", "GTEX.CA", "GTHE.CA", "GTWL.CA", "HBCO.CA",
+    "HDBK.CA", "HELI.CA", "HRHO.CA", "IBCT.CA", "ICFC.CA", "ICID.CA", "IDRE.CA",
+    "IEEC.CA", "IFAP.CA", "INEG.CA", "INFI.CA", "IRON.CA", "ISMA.CA", "ISMQ.CA",
+    "ISPH.CA", "JUFO.CA", "KABO.CA", "KORA.CA", "KRDI.CA", "KWIN.CA", "KZPC.CA",
+    "LCSW.CA", "LKGP.CA", "LUTS.CA", "MAAL.CA", "MASR.CA", "MBEG.CA", "MBSC.CA",
+    "MCQE.CA", "MCRO.CA", "MENA.CA", "MEPA.CA", "MFPC.CA", "MFSC.CA", "MHOT.CA",
+    "MICH.CA", "MILS.CA", "MIPH.CA", "MOED.CA", "MOIL.CA", "MOIN.CA", "MOSC.CA",
+    "MPCI.CA", "MPCO.CA", "MPRC.CA", "MTIE.CA", "NAHO.CA", "NARE.CA", "NCCW.CA",
+    "NCGC.CA", "NEDA.CA", "NHPS.CA", "NINH.CA", "NIPH.CA", "OBRI.CA", "OCAP.CA",
+    "OCDI.CA", "OCPH.CA", "ODIN.CA", "OFH.CA", "OIH.CA", "OLFI.CA", "ORAS.CA",
+    "ORHD.CA", "ORWE.CA", "PHAR.CA", "PHDC.CA", "PHGC.CA", "PHTV.CA", "POUL.CA",
+    "PRCL.CA", "PRDC.CA", "PRMH.CA", "QNBE.CA", "RACC.CA", "RAKT.CA", "RAYA.CA",
+    "RKAZ.CA", "RMDA.CA", "RMTV.CA", "ROTO.CA", "RREI.CA", "RTVC.CA", "RUBX.CA",
+    "SAUD.CA", "SCEM.CA", "SCFM.CA", "SCTS.CA", "SDTI.CA", "SEIG.CA", "SIEG.CA",
+    "SIPC.CA", "SKPC.CA", "SMFR.CA", "SNFC.CA", "SPIN.CA", "SPMD.CA", "SUCE.CA",
+    "SUGR.CA", "SVCE.CA", "SWDY.CA", "TALM.CA", "TANM.CA", "TAQA.CA", "TMGH.CA",
+    "TORA.CA", "TWSA.CA", "TYCN.CA", "UBEE.CA", "UEFM.CA", "UEGC.CA", "UNIP.CA",
+    "UNIT.CA", "UPMS.CA", "UTOP.CA", "VALU.CA", "VERT.CA", "VLMR.CA", "VLMRA.CA",
+    "WCDF.CA", "WKOL.CA", "ZEOT.CA", "ZMID.CA",
 ]
 
 if __name__ == "__main__":
@@ -827,9 +630,12 @@ if __name__ == "__main__":
         results.append({
             "Stock Name": p.ticker,
             "Entry Date": p.breakout_date,
-            "Exit Date": p.exit_date,
-            "Win Rate": p.pnl_pct / 100.0,  # تحويلها لـ Decimal للتنسيق في إكسيل
-            "Status": p.status,
+            "Entry Price": p.entry_price,
+            "Target": p.target_price,
+            "Stop Loss": p.stop_loss,
+            "Exit Date": p.exit_date if p.status != "Open" else "",
+            "Current Price": p.current_price,
+            "Status": p.status,  # محتفظ بها للتلوين
         })
 
     df_results = pd.DataFrame(results)
@@ -850,9 +656,13 @@ if __name__ == "__main__":
 
         excel_file = "egx_ascending_triangles_1y_live.xlsx"
 
-        # تصدير إلى Excel بتنسيق مطابق تماماً
+        # حفظ الحالة جانباً لغرض التلوين ثم استبعاد العمود من العرض إذا لم يطلب صراحة
+        statuses = df_results["Status"].tolist()
+        df_export = df_results.drop(columns=["Status"])
+
+        # تصدير إلى Excel بتنسيق مطابق تماماً للأعمدة الـ 7 المطلوبة
         with pd.ExcelWriter(excel_file, engine="openpyxl") as writer:
-            df_results.to_excel(writer, sheet_name="Trade_Results", index=False)
+            df_export.to_excel(writer, sheet_name="Trade_Results", index=False)
             workbook = writer.book
             worksheet = writer.sheets["Trade_Results"]
 
@@ -862,64 +672,57 @@ if __name__ == "__main__":
             )
             header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
 
-            # ألوان الحالات (Win/Loss/Open)
+            # ألوان الصفوف حسب حالة الصفقة (Win/Loss/Open)
+            win_font = Font(color="276A3C", bold=True)
+            loss_font = Font(color="C65911", bold=True)
+            open_font = Font(color="1F497D", bold=True)
+
             win_fill = PatternFill(
                 start_color="E2EFDA", end_color="E2EFDA", fill_type="solid"
             )
-            win_font = Font(color="276A3C", bold=True)
-
             loss_fill = PatternFill(
                 start_color="FCE4D6", end_color="FCE4D6", fill_type="solid"
             )
-            loss_font = Font(color="C65911", bold=True)
-
             open_fill = PatternFill(
                 start_color="D9E1F2", end_color="D9E1F2", fill_type="solid"
             )
-            open_font = Font(color="1F497D", bold=True)
 
             align_center = Alignment(horizontal="center", vertical="center")
 
-            # تنسيق الهيدر
-            for col_num in range(1, 6):
+            # تنسيق الهيدر (الأعمدة الـ 7)
+            for col_num in range(1, 8):
                 cell = worksheet.cell(row=1, column=col_num)
                 cell.fill = header_fill
                 cell.font = header_font
                 cell.alignment = align_center
 
             # تنسيق البيانات
-            for row_idx in range(2, len(df_results) + 2):
-                status_val = worksheet.cell(row=row_idx, column=5).value
+            for row_idx in range(2, len(df_export) + 2):
+                status_val = statuses[row_idx - 2]
 
-                # محاذاة الأعمدة
-                for col_idx in range(1, 6):
+                # محاذاة وتنسيق الأرقام
+                for col_idx in range(1, 8):
                     c = worksheet.cell(row=row_idx, column=col_idx)
                     c.alignment = align_center
+                    
+                    # تنسيق الأسعار
+                    if col_idx in [3, 4, 5, 7]:
+                        c.number_format = "#,##0.00"
 
-                # تنسيق النسبة المئوية للـ Win Rate
-                pnl_cell = worksheet.cell(row=row_idx, column=4)
-                pnl_cell.number_format = "0.00%"
+                # تلوين الصف بالكامل بناءً على الحالة
+                target_fill = win_fill if status_val == "Win" else (loss_fill if status_val == "Loss" else open_fill)
+                target_font = win_font if status_val == "Win" else (loss_font if status_val == "Loss" else open_font)
 
-                # التلوين حسب الحالة
-                status_cell = worksheet.cell(row=row_idx, column=5)
-                if status_val == "Win":
-                    status_cell.fill = win_fill
-                    status_cell.font = win_font
-                    pnl_cell.font = win_font
-                elif status_val == "Loss":
-                    status_cell.fill = loss_fill
-                    status_cell.font = loss_font
-                    pnl_cell.font = loss_font
-                elif status_val == "Open":
-                    status_cell.fill = open_fill
-                    status_cell.font = open_font
-                    pnl_cell.font = open_font
+                for col_idx in range(1, 8):
+                    cell = worksheet.cell(row=row_idx, column=col_idx)
+                    cell.fill = target_fill
+                    cell.font = target_font
 
             # ضبط عرض الأعمدة تلقائياً
             for col in worksheet.columns:
                 max_len = max(len(str(cell.value or "")) for cell in col)
                 col_letter = openpyxl.utils.get_column_letter(col[0].column)
-                worksheet.column_dimensions[col_letter].width = max(max_len + 4, 14)
+                worksheet.column_dimensions[col_letter].width = max(max_len + 5, 15)
 
         print("\n" + "=" * 80)
         print(f"🎉 تم الانتهاء بنجاح! إجمالي الصفقات المكتشفة: {len(df_results)}")

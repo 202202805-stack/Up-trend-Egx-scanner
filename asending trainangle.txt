@@ -1,4 +1,3 @@
-
 # ═══════════════════════════════════════════════════════════════════════════════
 #  EGX ASCENDING TRIANGLE SCANNER WITH TRADINGVIEW LIVE DATA & OPEN POSITIONS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -622,7 +621,7 @@ if __name__ == "__main__":
                 all_detected_patterns.extend(patterns)
 
     # ═══════════════════════════════════════════════════════════════════════════════
-    # 5. EXCEL EXPORT & BEAUTIFUL STYLING MATCHING IMAGE
+    # 5. EXCEL EXPORT & BEAUTIFUL STYLING MATCHING IMAGE (WITH 8 COLUMNS)
     # ═══════════════════════════════════════════════════════════════════════════════
 
     results = []
@@ -635,7 +634,7 @@ if __name__ == "__main__":
             "Stop Loss": p.stop_loss,
             "Exit Date": p.exit_date if p.status != "Open" else "",
             "Current Price": p.current_price,
-            "Status": p.status,  # محتفظ بها للتلوين
+            "Status": p.status,  # العمـود الثامـن المطلوب
         })
 
     df_results = pd.DataFrame(results)
@@ -656,13 +655,9 @@ if __name__ == "__main__":
 
         excel_file = "egx_ascending_triangles_1y_live.xlsx"
 
-        # حفظ الحالة جانباً لغرض التلوين ثم استبعاد العمود من العرض إذا لم يطلب صراحة
-        statuses = df_results["Status"].tolist()
-        df_export = df_results.drop(columns=["Status"])
-
-        # تصدير إلى Excel بتنسيق مطابق تماماً للأعمدة الـ 7 المطلوبة
+        # تصدير إلى Excel بتنسيق مطابق تماماً للأعمدة الـ 8 المطلوبة
         with pd.ExcelWriter(excel_file, engine="openpyxl") as writer:
-            df_export.to_excel(writer, sheet_name="Trade_Results", index=False)
+            df_results.to_excel(writer, sheet_name="Trade_Results", index=False)
             workbook = writer.book
             worksheet = writer.sheets["Trade_Results"]
 
@@ -672,10 +667,10 @@ if __name__ == "__main__":
             )
             header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
 
-            # ألوان الصفوف حسب حالة الصفقة (Win/Loss/Open)
-            win_font = Font(color="276A3C", bold=True)
-            loss_font = Font(color="C65911", bold=True)
-            open_font = Font(color="1F497D", bold=True)
+            # ألوان وقواعد التنسيق لحالة الصفقة (Win/Loss/Open)
+            win_font = Font(name="Calibri", size=11, color="276A3C", bold=True)
+            loss_font = Font(name="Calibri", size=11, color="C65911", bold=True)
+            open_font = Font(name="Calibri", size=11, color="896800", bold=True)
 
             win_fill = PatternFill(
                 start_color="E2EFDA", end_color="E2EFDA", fill_type="solid"
@@ -684,39 +679,40 @@ if __name__ == "__main__":
                 start_color="FCE4D6", end_color="FCE4D6", fill_type="solid"
             )
             open_fill = PatternFill(
-                start_color="D9E1F2", end_color="D9E1F2", fill_type="solid"
+                start_color="FFF2CC", end_color="FFF2CC", fill_type="solid"
             )
 
             align_center = Alignment(horizontal="center", vertical="center")
 
-            # تنسيق الهيدر (الأعمدة الـ 7)
-            for col_num in range(1, 8):
+            # تنسيق الهيدر (الأعمدة الـ 8)
+            for col_num in range(1, 9):
                 cell = worksheet.cell(row=1, column=col_num)
                 cell.fill = header_fill
                 cell.font = header_font
                 cell.alignment = align_center
 
             # تنسيق البيانات
-            for row_idx in range(2, len(df_export) + 2):
-                status_val = statuses[row_idx - 2]
+            for row_idx in range(2, len(df_results) + 2):
+                status_val = df_results.loc[row_idx - 2, "Status"]
 
-                # محاذاة وتنسيق الأرقام
-                for col_idx in range(1, 8):
-                    c = worksheet.cell(row=row_idx, column=col_idx)
-                    c.alignment = align_center
-                    
-                    # تنسيق الأسعار
-                    if col_idx in [3, 4, 5, 7]:
-                        c.number_format = "#,##0.00"
-
-                # تلوين الصف بالكامل بناءً على الحالة
+                # اختيار اللون المناسب للصف بناءً على حالة العمود الثامن
                 target_fill = win_fill if status_val == "Win" else (loss_fill if status_val == "Loss" else open_fill)
                 target_font = win_font if status_val == "Win" else (loss_font if status_val == "Loss" else open_font)
 
-                for col_idx in range(1, 8):
-                    cell = worksheet.cell(row=row_idx, column=col_idx)
-                    cell.fill = target_fill
-                    cell.font = target_font
+                # تنسيق محاذاة الأرقام والتواريخ والألوان للصف بالكامل (8 أعمدة)
+                for col_idx in range(1, 9):
+                    c = worksheet.cell(row=row_idx, column=col_idx)
+                    c.alignment = align_center
+                    c.fill = target_fill
+                    c.font = Font(name="Calibri", size=10)
+                    
+                    # تنسيق الأرقام والأسعار
+                    if col_idx in [3, 4, 5, 7]:
+                        c.number_format = "#,##0.00"
+
+                # تنسيق خاص ومميز لخلية Status في العمود الثامن
+                status_cell = worksheet.cell(row=row_idx, column=8)
+                status_cell.font = target_font
 
             # ضبط عرض الأعمدة تلقائياً
             for col in worksheet.columns:
@@ -734,7 +730,7 @@ if __name__ == "__main__":
             f" {len(df_results[df_results['Status'] == 'Loss'])}"
         )
         print(
-            f"🔵 الصفقات المستمرة (Open):"
+            f"🟡 الصفقات المستمرة (Open):"
             f" {len(df_results[df_results['Status'] == 'Open'])}"
         )
         print("=" * 80)

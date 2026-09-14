@@ -15,12 +15,6 @@ from scipy.signal import argrelextrema
 
 warnings.filterwarnings('ignore')
 
-try:
-    from google.colab import files
-    COLAB_ENV = True
-except ImportError:
-    COLAB_ENV = False
-
 
 # ==============================================================================
 # 1. TRADINGVIEW INTEGRATION FOR LIVE DATA
@@ -37,11 +31,11 @@ def fetch_tradingview_live_data(tickers: List[str]) -> dict:
         "columns": ["name", "open", "high", "low", "close", "volume"]
     }
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
         if response.status_code == 200:
             res_json = response.json()
             for item in res_json.get("data", []):
@@ -64,12 +58,15 @@ def fetch_tradingview_live_data(tickers: List[str]) -> dict:
 
 def get_combined_stock_data(ticker: str, start_date: datetime.datetime, end_date: datetime.datetime, tv_live_dict: dict) -> pd.DataFrame:
     """تحميل بيانات Yahoo Finance ودمج آخر سعر لحظي من TradingView"""
-    df = yf.download(
-        ticker,
-        start=start_date.strftime('%Y-%m-%d'),
-        end=end_date.strftime('%Y-%m-%d'),
-        progress=False
-    )
+    try:
+        df = yf.download(
+            ticker,
+            start=start_date.strftime('%Y-%m-%d'),
+            end=end_date.strftime('%Y-%m-%d'),
+            progress=False
+        )
+    except Exception:
+        return pd.DataFrame()
 
     if df.empty:
         return pd.DataFrame()
@@ -275,18 +272,16 @@ def run_backtest_on_stock(
 
             future_df = df.iloc[entry_idx + 1 : entry_idx + 1 + max_holding_bars]
 
-            # تقدير مبدئي للهدف Dynamic P6
             target_p6 = round(float(pattern.upper_value_at(pattern.p5.index + 10)), 2)
 
             if future_df.empty:
-                # صفقة مفتوحة حديثاً
                 trades.append({
                     'Stock Name': ticker,
                     'Entry Date': entry_date.strftime('%Y-%m-%d'),
                     'Entry Price': entry_price,
                     'Target': target_p6,
                     'Stop Loss': stop_loss,
-                    'Exit Date': None,  # يترك فارغاً حقيقياً للصفقة المفتوحة
+                    'Exit Date': None,
                     'Current Price': latest_close_price,
                     'Status': 'Open'
                 })
@@ -310,14 +305,11 @@ def run_backtest_on_stock(
                     exit_date = date_idx
                     break
 
-            # معالجة الصفقات المفتوحة والمغلقة:
             if status is None:
                 if (entry_idx + 1 + len(future_df)) >= len(df):
-                    # الصفقة مستمرة حتى اليوم ولم تكتمل مدتها أو لم تضرب الهدف/الوقف
                     exit_date_str = None
                     status_str = 'Open'
                 else:
-                    # اكتملت مدة الاحتفاظ دون ضرب هدف أو وقف حاد
                     exit_date_str = future_df.index[-1].strftime('%Y-%m-%d')
                     exit_price = future_df['close'].iloc[-1]
                     status_str = 'Win' if exit_price >= entry_price else 'Loss'
@@ -353,7 +345,7 @@ def format_excel_file(excel_filename: str):
     ws.views.sheetView[0].showGridLines = True
     ws.views.sheetView[0].rightToLeft = False
 
-    header_fill = PatternFill(start_color="1B365D", end_color="1B365D", fill_type="solid")  # Dark Navy
+    header_fill = PatternFill(start_color="1B365D", end_color="1B365D", fill_type="solid")
     header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
 
     data_font = Font(name="Calibri", size=11)
@@ -374,10 +366,9 @@ def format_excel_file(excel_filename: str):
 
     columns = ['Stock Name', 'Entry Date', 'Entry Price', 'Target', 'Stop Loss', 'Exit Date', 'Current Price', 'Status']
 
-    # ألوان خانة الـ Status
-    win_fill = PatternFill(start_color="D4EDDA", end_color="D4EDDA", fill_type="solid")   # أخضر فاتح
-    loss_fill = PatternFill(start_color="F8D7DA", end_color="F8D7DA", fill_type="solid")  # أحمر فاتح
-    open_fill = PatternFill(start_color="FFF3CD", end_color="FFF3CD", fill_type="solid")  # أصفر فاتح
+    win_fill = PatternFill(start_color="D4EDDA", end_color="D4EDDA", fill_type="solid")
+    loss_fill = PatternFill(start_color="F8D7DA", end_color="F8D7DA", fill_type="solid")
+    open_fill = PatternFill(start_color="FFF3CD", end_color="FFF3CD", fill_type="solid")
 
     win_font = Font(name="Calibri", size=11, bold=True, color="155724")
     loss_font = Font(name="Calibri", size=11, bold=True, color="721C24")
@@ -393,11 +384,9 @@ def format_excel_file(excel_filename: str):
 
             col_name = columns[col - 1] if col - 1 < len(columns) else ""
 
-            # تنسيق الأرقام والأسعار
             if col_name in ['Entry Price', 'Target', 'Stop Loss', 'Current Price']:
                 cell.number_format = '#,##0.00'
 
-            # التنسيق الشرطي لعمود الـ Status
             if col_name == 'Status':
                 val = str(cell.value).strip() if cell.value else ""
                 if val == 'Win':
@@ -411,14 +400,8 @@ def format_excel_file(excel_filename: str):
                     cell.font = open_font
 
     column_widths = {
-        'A': 18,  # Stock Name
-        'B': 16,  # Entry Date
-        'C': 15,  # Entry Price
-        'D': 15,  # Target
-        'E': 15,  # Stop Loss
-        'F': 16,  # Exit Date
-        'G': 16,  # Current Price
-        'H': 14   # Status
+        'A': 18, 'B': 16, 'C': 15, 'D': 15,
+        'E': 15, 'F': 16, 'G': 16, 'H': 14
     }
     for col_letter, width in column_widths.items():
         ws.column_dimensions[col_letter].width = width
@@ -428,10 +411,8 @@ def format_excel_file(excel_filename: str):
         print(f"\n========================================================")
         print(f"📊 EXCEL EXPORT COMPLETED: {excel_filename}")
         print(f"========================================================")
-    except PermissionError:
-        alt_filename = f"Broadening_Bottoms_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        wb.save(alt_filename)
-        print(f"\n[Permission Error] Main file locked. Saved as: {alt_filename}")
+    except Exception as e:
+        print(f"\n[Error saving file]: {e}")
 
 
 # ==============================================================================
@@ -488,10 +469,8 @@ if __name__ == "__main__":
     df_trades = pd.DataFrame(all_trades)
 
     if not df_trades.empty:
-        # إزالة التكرارات
         df_trades.drop_duplicates(subset=['Stock Name', 'Entry Date'], inplace=True)
 
-        # الترتيب الزمني من الأقدم إلى الأحدث
         df_trades['Temp Date'] = pd.to_datetime(df_trades['Entry Date'])
         df_trades.sort_values(by='Temp Date', ascending=True, inplace=True)
         df_trades.drop(columns=['Temp Date'], inplace=True)
@@ -503,9 +482,6 @@ if __name__ == "__main__":
 
         format_excel_file(excel_filename)
         
-        # ==========================================================
-        # طباعة النتائج مباشرة في الـ Output / Terminal
-        # ==========================================================
         print("\n" + "=" * 80)
         print("🎯 SCAN & BACKTEST RESULTS SUMMARY")
         print("=" * 80)
@@ -520,8 +496,5 @@ if __name__ == "__main__":
             print(df_trades.tail(10)[['Stock Name', 'Entry Date', 'Entry Price', 'Target', 'Stop Loss', 'Exit Date', 'Status']].to_string(index=False))
             
         print("\n" + "=" * 80)
-
-        if COLAB_ENV:
-            files.download(excel_filename)
     else:
         print("\nNo Broadening Bottom patterns detected in the current period.")

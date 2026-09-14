@@ -1,8 +1,15 @@
 import datetime
 import glob
 import os
+import time
 import pandas as pd
 import requests
+
+# ضبط متصفح وهمي لمنع حظر خوادم GitHub من مصادر البيانات
+os.environ["HTTP_USER_AGENT"] = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
+    " like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -58,7 +65,7 @@ def extract_trades(local_scope, strategy_name, excel_files_before):
     extracted_open_trades = []
     df_result = None
 
-    # 1. البحث عن ملف Excel جديد تم إنشاؤه
+    # 1. البحث عن ملفات إكسيل حديثة
     excel_files_after = set(glob.glob("*.xlsx"))
     new_excel_files = list(excel_files_after - excel_files_before)
 
@@ -68,9 +75,9 @@ def extract_trades(local_scope, strategy_name, excel_files_before):
             df_result = pd.read_excel(latest_file)
             print(f"  └─ 📁 Read from Excel: {latest_file}")
         except Exception as e:
-            print(f"  └─ ⚠️ Could not read Excel: {e}")
+            print(f"  └─ ⚠️ Could not read Excel {latest_file}: {e}")
 
-    # 2. فحص شامل للذاكرة: البحث عن أي DataFrame موجود داخل local_scope بغض النظر عن اسمه
+    # 2. فحص الذاكرة عند عدم وجود ملف إكسيل
     if df_result is None or df_result.empty:
         for var_name, var_value in local_scope.items():
             if var_name.startswith("__"):
@@ -94,7 +101,7 @@ def extract_trades(local_scope, strategy_name, excel_files_before):
     # توحيد أسماء الأعمدة
     df_result.columns = [str(c).strip().title() for c in df_result.columns]
 
-    # 3. تحديد عمود الحالة بمرونة كاملة
+    # 3. تحديد أعمدة الحالة وتاريخ الخروج بمرونة كاملة
     status_col = None
     for col in [
         "State",
@@ -102,6 +109,7 @@ def extract_trades(local_scope, strategy_name, excel_files_before):
         "Trade Status",
         "Position Status",
         "Trade_State",
+        "Result",
     ]:
         if col in df_result.columns:
             status_col = col
@@ -120,31 +128,43 @@ def extract_trades(local_scope, strategy_name, excel_files_before):
             break
 
     # 4. تصفية الصفقات المفتوحة
+    open_df = pd.DataFrame()
+
     if status_col:
-        open_df = df_result[
+        open_mask = (
             df_result[status_col]
             .astype(str)
             .str.strip()
             .str.upper()
-            .str.contains("OPEN|ACTIVE|مفتوحة|مستمرة")
-        ]
-    elif exit_date_col:
+            .str.contains("OPEN|ACTIVE|مفتوحة|مستمرة|HOLD|RUNNING|1|TRUE")
+        )
+        closed_mask = (
+            df_result[status_col]
+            .astype(str)
+            .str.strip()
+            .str.upper()
+            .str.contains("WIN|LOSS|CLOSED|مغلقة|مكسب|خسارة")
+        )
+        open_df = df_result[open_mask & (~closed_mask)]
+
+    if open_df.empty and exit_date_col:
         open_df = df_result[
             df_result[exit_date_col].isna()
             | (df_result[exit_date_col].astype(str).str.strip() == "")
             | (df_result[exit_date_col].astype(str).str.lower() == "nan")
             | (df_result[exit_date_col].astype(str).str.lower() == "nat")
             | (df_result[exit_date_col].astype(str).str.lower() == "none")
+            | (df_result[exit_date_col].astype(str).str.strip() == "-")
         ]
-    else:
-        # إذا لم يوجد عمود حالة ولا تاريخ خروج، نعتبر جميع الأسطر صفقات متاحة
+
+    if open_df.empty and not status_col and not exit_date_col:
         open_df = df_result.copy()
 
     if open_df.empty:
         print("  └─ ℹ️ Trades found, but 0 positions matched 'OPEN' state.")
         return []
 
-    # 5. استخراج البيانات
+    # 5. استخراج الصفقات
     for _, row in open_df.iterrows():
 
         def get_val(keys, default=0.0):
@@ -199,7 +219,7 @@ def extract_trades(local_scope, strategy_name, excel_files_before):
     return extracted_open_trades
 
 
-def run_txt_script(filename: str, strategy_name: str):
+def run_txt_script(filename: str, strategy_name: str, max_retries: int = 2):
     actual_filename = find_actual_file(filename)
 
     if not os.path.exists(actual_filename):
@@ -208,38 +228,49 @@ def run_txt_script(filename: str, strategy_name: str):
 
     print(f"🔍 Processing: {actual_filename} ({strategy_name})...")
 
-    local_scope = {}
-    excel_files_before = set(glob.glob("*.xlsx"))
+    for attempt in range(1, max_retries + 1):
+        local_scope = {}
+        excel_files_before = set(glob.glob("*.xlsx"))
 
-    try:
-        with open(actual_filename, "r", encoding="utf-8") as f:
-            code = f.read()
+        try:
+            with open(actual_filename, "r", encoding="utf-8") as f:
+                code = f.read()
 
-        exec(code, local_scope)
+            exec(code, local_scope)
 
-        open_trades = extract_trades(
-            local_scope, strategy_name, excel_files_before
-        )
-        print(f"  └─ 🟢 Result: {len(open_trades)} OPEN position(s).")
+            open_trades = extract_trades(
+                local_scope, strategy_name, excel_files_before
+            )
 
-        # حذف ملفات Excel الناتجة لتجنب قراءتها في الاستراتيجية التالية
-        excel_files_after = set(glob.glob("*.xlsx"))
-        for nf in excel_files_after - excel_files_before:
-            try:
-                os.remove(nf)
-            except Exception:
-                pass
+            # نظف ملفات الـ Excel الناتجة فوراً
+            excel_files_after = set(glob.glob("*.xlsx"))
+            for nf in excel_files_after - excel_files_before:
+                try:
+                    os.remove(nf)
+                except Exception:
+                    pass
 
-        return open_trades
+            if open_trades or attempt == max_retries:
+                print(f"  └─ 🟢 Result: {len(open_trades)} OPEN position(s).")
+                return open_trades
 
-    except Exception as e:
-        print(f"⚠️ Error executing {actual_filename}: {e}")
-        return []
+            print(
+                f"  └─ 🔄 Attempt {attempt} returned 0 trades. Retrying in 3"
+                " seconds..."
+            )
+            time.sleep(3)
+
+        except Exception as e:
+            print(f"⚠️ Error executing {actual_filename} (Attempt {attempt}): {e}")
+            if attempt < max_retries:
+                time.sleep(3)
+            else:
+                return []
 
 
 def main():
     today_str = datetime.date.today().strftime("%Y-%m-%d")
-    print(f"🚀 Starting EGX Scan ({today_str})...\n")
+    print(f"🚀 Starting EGX Multi-Strategy Scan ({today_str})...\n")
 
     all_open_signals = []
 

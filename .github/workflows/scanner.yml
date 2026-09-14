@@ -33,11 +33,8 @@ jobs:
           pip install ta-lib
           pip install yfinance pandas numpy scipy openpyxl tqdm requests
 
-      - name: Run Chart Patterns
-        run: python main.py
-
-      - name: Upload Excel Artifact
-        uses: actions/upload-artifact@v4.4.3
-        with:
-          name: EGX-Backtest-Results
-          path: EGX_Triple_Bottom_Bulkowski_Results.xlsx
+      - name: Run Master Scanner & Telegram Notifier
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python runner.py

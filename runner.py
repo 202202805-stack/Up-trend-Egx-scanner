@@ -40,7 +40,7 @@ def send_telegram_message(message: str):
         print(f"⚠️ Exception sending Telegram message: {e}")
 
 def extract_trades(local_scope, strategy_name, excel_files_before):
-    """استخراج الصفقات المفتوحة من ملف Excel المنشأ حديثاً أو من الذاكرة"""
+    """استخراج الصفقات المفتوحة بناءً على عدم وجود تاريخ خروج أو شرط OPEN"""
     extracted_open_trades = []
     df_result = None
 
@@ -62,7 +62,7 @@ def extract_trades(local_scope, strategy_name, excel_files_before):
             if var_name in local_scope and local_scope[var_name] is not None:
                 val = local_scope[var_name]
                 if isinstance(val, pd.DataFrame):
-                    df_result = val
+                    df_result = val.copy()
                 elif isinstance(val, list):
                     df_result = pd.DataFrame(val)
                 break
@@ -70,25 +70,42 @@ def extract_trades(local_scope, strategy_name, excel_files_before):
     if df_result is None or df_result.empty:
         return []
 
-    # توحيد أسماء الأعمدة لتسهيل البحث
+    # توحيد أسماء الأعمدة لتسهيل البحث (حروف متناسقة بدون مسافات زائدة)
     df_result.columns = [str(c).strip().title() for c in df_result.columns]
 
-    # العثور على عمود الحالة (Status)
-    status_col = None
-    for col in ["Status", "Trade Status", "Position Status", "State", "Trade_Status", "Position_Status"]:
+    # 3. تحديد الصفقات المفتوحة (التي يكون تاريخ خروجها فارغًا)
+    exit_date_col = None
+    for col in ["Exit Date", "Exit_Date", "ExitDate", "Close Date"]:
         if col in df_result.columns:
-            status_col = col
+            exit_date_col = col
             break
 
-    if not status_col:
+    if exit_date_col:
+        # الصفقة تعتبر مفتوحة إذا كان تاريخ الخروج NaN أو فارغًا
+        open_df = df_result[
+            df_result[exit_date_col].isna() | 
+            (df_result[exit_date_col].astype(str).str.strip() == "") | 
+            (df_result[exit_date_col].astype(str).str.lower() == "nan") |
+            (df_result[exit_date_col].astype(str).str.lower() == "nat")
+        ]
+    else:
+        # احتياطي: إذا لم يتوفر عمود تاريخ الخروج، نتحقق من عمود الحالة Status
+        status_col = None
+        for col in ["Status", "Trade Status", "Position Status", "State"]:
+            if col in df_result.columns:
+                status_col = col
+                break
+        
+        if status_col:
+            open_df = df_result[df_result[status_col].astype(str).str.upper().str.contains("OPEN|ACTIVE|مفتوحة|مستمرة")]
+        else:
+            open_df = pd.DataFrame()
+
+    if open_df.empty:
         return []
 
-    # تصفية الصفقات المفتوحة فقط
-    mask = df_result[status_col].astype(str).str.upper().str.contains("OPEN|ACTIVE|مفتوحة|مستمرة")
-    open_df = df_result[mask]
-
+    # 4. قراءة تفاصيل الصفقات المفتوحة
     for _, row in open_df.iterrows():
-        # دالة مساعدة لجلب أحدث قيمة من عدة مسميات للأعمدة
         def get_val(keys, default=0.0):
             for k in keys:
                 for col in df_result.columns:
@@ -106,11 +123,18 @@ def extract_trades(local_scope, strategy_name, excel_files_before):
         stop = get_val(["Stop Loss", "Stop", "Stop_Loss"], 0.0)
         pnl = get_val(["PnL %", "Unrealized PnL %", "Return %", "Win Rate", "Pnl"], 0.0)
 
-        # تحويل النسبة المئوية إذا كانت كسرية
+        # حساب نسبة الربح/الخسارة اللحظية تلقائيًا إذا لم تكن موجودة أو كانت 0
         try:
-            pnl = float(pnl)
-            if abs(pnl) <= 1.0 and pnl != 0.0:
-                pnl = pnl * 100
+            entry_float = float(entry_p)
+            curr_float = float(curr_p)
+            pnl_float = float(pnl)
+
+            if pnl_float == 0.0 and entry_float > 0 and curr_float > 0:
+                pnl = ((curr_float - entry_float) / entry_float) * 100
+            elif abs(pnl_float) <= 1.0 and pnl_float != 0.0:
+                pnl = pnl_float * 100
+            else:
+                pnl = pnl_float
         except Exception:
             pnl = 0.0
 
@@ -145,7 +169,7 @@ def run_txt_script(filename: str, strategy_name: str):
         # تنفيذ الملف
         exec(code, local_scope)
 
-        # استخراج الصفقات المفتوحة بمرونة عالية
+        # استخراج الصفقات المفتوحة
         open_trades = extract_trades(local_scope, strategy_name, excel_files_before)
         print(f"  └─ 🟢 Found {len(open_trades)} OPEN position(s).")
         return open_trades

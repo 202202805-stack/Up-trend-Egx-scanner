@@ -34,7 +34,7 @@ class TBConfig:
     downtrend_lookback: int = 60
     downtrend_drop_pct: float = 15.0
     breakout_lookforward: int = 90
-    max_holding_bars: int = 120
+    max_holding_bars: int = 120  # أقصى مدة احتفاظ بالشموع
     sma_regime_len: int = 50
     stop_buffer_pct: float = 0.005
 
@@ -553,19 +553,30 @@ def analyze_stock_trades(ticker: str, df: pd.DataFrame, cfg: TBConfig) -> list:
         exit_date = None
         exit_price = None
 
-        for curr_idx in range(entry_idx, n):
+        # تحديد أقصى مؤشر شمعة مسموح به للاحتفاظ
+        max_holding_idx = min(n - 1, entry_idx + cfg.max_holding_bars)
+
+        for curr_idx in range(entry_idx, max_holding_idx + 1):
             curr_low = lows[curr_idx]
             curr_high = highs[curr_idx]
 
+            # 1. فحص الوصول للهدف
             if curr_high >= target:
                 exit_date = dates[curr_idx].strftime("%Y-%m-%d")
                 exit_price = target if opens[curr_idx] < target else opens[curr_idx]
                 break
+            # 2. فحص كسر وقف الخسارة
             elif curr_low <= stop:
                 exit_date = dates[curr_idx].strftime("%Y-%m-%d")
                 exit_price = stop if opens[curr_idx] > stop else opens[curr_idx]
                 break
 
+        # 3. إغلاق الصفقة بالزمن عند انتهاء أقصى مدة احتفاظ
+        if exit_date is None and max_holding_idx < n - 1:
+            exit_date = dates[max_holding_idx].strftime("%Y-%m-%d")
+            exit_price = round(float(closes[max_holding_idx]), 3)
+
+        # تسجيل الحالة والربح/الخسارة
         if exit_date is None:
             exit_date_str = ""
             pnl_ratio = (current_market_price - entry_price) / entry_price

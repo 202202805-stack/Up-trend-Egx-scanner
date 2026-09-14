@@ -1,24 +1,24 @@
 """
 ================================================================================
-BROADENING BOTTOMS BACKTESTER & SCANNER 
+BROADENING BOTTOMS BACKTESTER & SCANNER
 (1-YEAR DATA + TRADINGVIEW LIVE + DYNAMIC P6 TARGET + OPEN POSITIONS)
 ================================================================================
 """
 
-import os
-import math
-import warnings
 import datetime
+import math
+import os
+import warnings
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import numpy as np
+import openpyxl
 import pandas as pd
 import requests
 import yfinance as yf
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from scipy.signal import argrelextrema
-import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 warnings.filterwarnings('ignore')
 
@@ -238,7 +238,7 @@ class BroadeningBottomDetector:
 
 
 # ==============================================================================
-# 3. BACKTEST ENGINE WITH OPEN POSITIONS SUPPORT
+# 3. BACKTEST ENGINE WITH NEW COLUMNS STRUCTURE
 # ==============================================================================
 
 def run_backtest_on_stock(
@@ -259,6 +259,7 @@ def run_backtest_on_stock(
     except Exception:
         return trades
 
+    latest_close_price = round(float(df['close'].iloc[-1]), 2)
     window_size = 80
     step_size = 5
     i = 0
@@ -276,26 +277,29 @@ def run_backtest_on_stock(
 
             entry_date = pattern.p5.date
             entry_idx = df.index.get_loc(entry_date)
-            entry_price = df['close'].loc[entry_date]
-            stop_loss = pattern.p5.price * 0.98
+            entry_price = round(float(df['close'].loc[entry_date]), 2)
+            stop_loss = round(float(pattern.p5.price * 0.98), 2)
 
             future_df = df.iloc[entry_idx + 1 : entry_idx + 1 + max_holding_bars]
 
+            # تقدير مبدئي للهدف Dynamic P6
+            target_p6 = round(float(pattern.upper_value_at(pattern.p5.index + 10)), 2)
+
             if future_df.empty:
-                # الصفقة مفتوحة في نفس يوم الشمعة الحالية
-                exit_price = entry_price
+                # صفقة مفتوحة حديثاً
                 trades.append({
                     'Stock Name': ticker,
                     'Entry Date': entry_date.strftime('%Y-%m-%d'),
-                    'Exit Date': 'Open Position',
-                    'Win Rate': 0.0,
-                    'Status': 'Open'
+                    'Entry Price': entry_price,
+                    'Target': target_p6,
+                    'Stop Loss': stop_loss,
+                    'Exit Date': "",  # يترك فارغاً إذا كانت الصفقة مفتوحة
+                    'Current Price': latest_close_price
                 })
                 i += step_size
                 continue
 
             status = None
-            exit_price = entry_price
             exit_date = None
 
             for current_step, (date_idx, row) in enumerate(future_df.iterrows(), start=1):
@@ -304,37 +308,31 @@ def run_backtest_on_stock(
 
                 if row['high'] >= dynamic_target_p6:
                     status = 'Win'
-                    exit_price = dynamic_target_p6
+                    target_p6 = round(float(dynamic_target_p6), 2)
                     exit_date = date_idx
                     break
                 elif row['low'] <= stop_loss:
                     status = 'Loss'
-                    exit_price = stop_loss
                     exit_date = date_idx
                     break
 
-            # معالجة الصفقات المفتوحة (Open Positions)
+            # معالجة الصفقات المفتوحة والمغلقة
             if status is None:
-                # إذا وصلنا إلى آخر الشموع المتاحة ولم يتحقق الهدف أو الاستوب
                 if (entry_idx + 1 + len(future_df)) >= len(df):
-                    status = 'Open'
-                    exit_date_str = 'Open Position'
-                    exit_price = df['close'].iloc[-1]
+                    exit_date_str = ""  # يترك فارغاً إذا كانت الصفقة لا تزال مفتوحة
                 else:
-                    exit_price = future_df['close'].iloc[-1]
-                    status = 'Win' if exit_price > entry_price else 'Loss'
                     exit_date_str = future_df.index[-1].strftime('%Y-%m-%d')
             else:
                 exit_date_str = exit_date.strftime('%Y-%m-%d')
 
-            return_pct = (exit_price - entry_price) / entry_price
-
             trades.append({
                 'Stock Name': ticker,
                 'Entry Date': entry_date.strftime('%Y-%m-%d'),
+                'Entry Price': entry_price,
+                'Target': target_p6,
+                'Stop Loss': stop_loss,
                 'Exit Date': exit_date_str,
-                'Win Rate': return_pct,
-                'Status': status
+                'Current Price': latest_close_price
             })
 
             i += window_size // 2
@@ -345,7 +343,7 @@ def run_backtest_on_stock(
 
 
 # ==============================================================================
-# 4. SINGLE-SHEET EXCEL FORMATTING
+# 4. SINGLE-SHEET EXCEL FORMATTING (7 COLUMNS)
 # ==============================================================================
 
 def format_excel_file(excel_filename: str):
@@ -354,17 +352,8 @@ def format_excel_file(excel_filename: str):
     ws.views.sheetView[0].showGridLines = True
     ws.views.sheetView[0].rightToLeft = False
 
-    header_fill = PatternFill(start_color="1B365D", end_color="1B365D", fill_type="solid") # Dark Navy
+    header_fill = PatternFill(start_color="1B365D", end_color="1B365D", fill_type="solid")  # Dark Navy
     header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-
-    win_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid") # Light Green
-    win_font = Font(name="Calibri", size=11, bold=True, color="375623")
-
-    loss_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid") # Light Red
-    loss_font = Font(name="Calibri", size=11, bold=True, color="C65911")
-
-    open_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid") # Soft Blue
-    open_font = Font(name="Calibri", size=11, bold=True, color="1F4E78")
 
     data_font = Font(name="Calibri", size=11)
     thin_border = Border(
@@ -382,6 +371,8 @@ def format_excel_file(excel_filename: str):
         cell.font = header_font
         cell.alignment = align_center
 
+    columns = ['Stock Name', 'Entry Date', 'Entry Price', 'Target', 'Stop Loss', 'Exit Date', 'Current Price']
+
     for row in range(2, ws.max_row + 1):
         ws.row_dimensions[row].height = 20
         for col in range(1, ws.max_column + 1):
@@ -390,24 +381,21 @@ def format_excel_file(excel_filename: str):
             cell.border = thin_border
             cell.alignment = align_center
 
-            # Win Rate % Format
-            if col == 4:
-                cell.number_format = '0.00%'
+            col_name = columns[col - 1]
 
-            # Conditional Formatting Status
-            if col == 5:
-                val = str(cell.value or '').strip()
-                if val == 'Win':
-                    cell.fill = win_fill
-                    cell.font = win_font
-                elif val == 'Loss':
-                    cell.fill = loss_fill
-                    cell.font = loss_font
-                elif val == 'Open':
-                    cell.fill = open_fill
-                    cell.font = open_font
+            # Currency / Price Format for numeric values
+            if col_name in ['Entry Price', 'Target', 'Stop Loss', 'Current Price']:
+                cell.number_format = '#,##0.00'
 
-    column_widths = {'A': 18, 'B': 16, 'C': 18, 'D': 16, 'E': 15}
+    column_widths = {
+        'A': 18,  # Stock Name
+        'B': 16,  # Entry Date
+        'C': 15,  # Entry Price
+        'D': 15,  # Target
+        'E': 15,  # Stop Loss
+        'F': 16,  # Exit Date
+        'G': 16   # Current Price
+    }
     for col_letter, width in column_widths.items():
         ws.column_dimensions[col_letter].width = width
 

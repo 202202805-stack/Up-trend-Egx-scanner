@@ -8,14 +8,9 @@ import requests
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+# تم قيادته لتشغيل ملف Broadening Bottoms فقط
 PYTHON_STRATEGIES = [
     ("broadening_bottoms", "Broadening Bottoms"),
-    ("FLAGS", "Flags"),
-    ("adam_and_adam", "Adam & Adam"),
-    ("adam_and_eva", "Adam & Eve"),
-    ("ascending_triangle", "Ascending Triangle"),
-    ("pipe_bottom", "Pipe Bottom"),
-    ("tripple_bottom", "Triple Bottom"),
 ]
 
 
@@ -43,41 +38,35 @@ def send_telegram_message(message: str):
 
 
 def parse_trades_from_dataframe(df: pd.DataFrame, strategy_name: str) -> list:
-    """تحديد واستخراج الصفقات المفتوحة بجميع الصياغات الممكنة"""
     open_signals = []
     if df.empty:
         return open_signals
 
-    # توحيد أسماء الأعمدة
     df.columns = [str(c).strip().title() for c in df.columns]
 
-    # البحث عن أعمدة الحالة وتاريخ الخروج
     status_col = next((c for c in df.columns if any(k in c.lower() for k in ["state", "status", "trade status"])), None)
     exit_col = next((c for c in df.columns if any(k in c.lower() for k in ["exit date", "exit_date", "close date", "exit"])), None)
 
     for _, row in df.iterrows():
         is_open = False
-        
-        # 1. التحقق من عمود الحالة
+
         if status_col:
             val = str(row.get(status_col, "")).strip().upper()
             if any(s in val for s in ["OPEN", "ACTIVE", "مفتوحة", "مستمرة"]):
                 is_open = True
 
-        # 2. التحقق من عمود تاريخ الخروج إذا لم تقتنع بقيمة الحالة
         if not is_open and exit_col:
             val = str(row.get(exit_col, "")).strip().lower()
             if val in ["", "none", "nan", "nat", "0", "null"]:
                 is_open = True
 
-        # 3. إذا لم يوجد العمودان، نعتبر الصفقات التي ليس لها خروج مفتوحة
         if not status_col and not exit_col:
             is_open = True
 
         if is_open:
             entry_p = float(row.get("Entry Price", row.get("Buy Price", row.get("Entry_Price", 0.0))) or 0.0)
             curr_p = float(row.get("Current Price", row.get("Last Price", row.get("Close", entry_p))) or entry_p)
-            
+
             pnl_val = row.get("Pnp_Ratio", row.get("Pnl %", row.get("Return %", row.get("PnL", 0.0))))
             try:
                 pnl = float(pnl_val)
@@ -103,14 +92,13 @@ def parse_trades_from_dataframe(df: pd.DataFrame, strategy_name: str) -> list:
 
 
 def run_py_strategy(module_name: str, strategy_name: str) -> list:
-    print(f"🔍 Processing: {module_name}.py ({strategy_name})...")
+    print(f"🔍 Executing single strategy: {module_name}.py ({strategy_name})...")
     excel_before = set(glob.glob("*.xlsx"))
 
     try:
         strat_module = importlib.import_module(module_name)
         open_signals = []
 
-        # 1. البحث عن الـ DataFrames المتولدة في ملف البايثون
         for var_name in ["all_trades", "trades", "trades_df", "results", "df_results", "open_trades"]:
             trades_raw = getattr(strat_module, var_name, None)
             if trades_raw is not None:
@@ -119,7 +107,6 @@ def run_py_strategy(module_name: str, strategy_name: str) -> list:
                 if open_signals:
                     break
 
-        # 2. القراءة مباشرة من ملف الـ Excel الجديد إن لم يجد الصفقات في الذاكرة
         if not open_signals:
             excel_after = set(glob.glob("*.xlsx"))
             new_files = list(excel_after - excel_before)
@@ -132,7 +119,7 @@ def run_py_strategy(module_name: str, strategy_name: str) -> list:
         return open_signals
 
     except ModuleNotFoundError:
-        print(f"⚠️ Module not found: {module_name}.py. Skipping.")
+        print(f"⚠️ Module not found: {module_name}.py")
         return []
     except Exception as e:
         print(f"⚠️ Error executing {module_name}.py: {e}")
@@ -141,7 +128,7 @@ def run_py_strategy(module_name: str, strategy_name: str) -> list:
 
 def main():
     today_str = datetime.date.today().strftime("%Y-%m-%d")
-    print(f"🚀 Starting EGX Multi-Strategy Scan ({today_str})...\n")
+    print(f"🚀 Starting EGX Single Strategy Scan ({today_str})...\n")
 
     all_open_signals = []
 
@@ -150,15 +137,15 @@ def main():
         all_open_signals.extend(signals)
 
     if not all_open_signals:
-        msg = f"📊 <b>EGX Market Scan ({today_str})</b>\n\nNo active OPEN signals found across all strategies today."
+        msg = f"📊 <b>EGX Market Scan ({today_str})</b>\n\nNo active OPEN signals found for Broadening Bottoms."
         print("\n" + msg)
         send_telegram_message(msg)
         return
 
     msg_lines = [
-        "🚨 <b>EGX ALL STRATEGIES - ACTIVE SIGNALS</b> 🚨",
+        "🚨 <b>EGX SCAN - ACTIVE BROADENING BOTTOM SIGNALS</b> 🚨",
         f"📅 <i>Date: {today_str}</i>",
-        f"🌐 Total Active Signals: <b>{len(all_open_signals)}</b>\n",
+        f"🌐 Total Signals: <b>{len(all_open_signals)}</b>\n",
         "========================================",
     ]
 

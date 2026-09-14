@@ -125,7 +125,7 @@ class TrianglePattern:
     current_price: float = 0.0
     exit_date: str = ""
     pnl_pct: float = 0.0
-    status: str = "Open"  # Win, Loss, Open
+    status: str = "Open"  # Win, Loss, Open, Exit Time
     structure_score: float = 0.0
     volume_score: float = 0.0
     breakout_score: float = 0.0
@@ -379,29 +379,43 @@ class AscendingTriangleEngine:
         return confirmed, spike_ratio
 
     def _simulate_trade(
-        self, df: pd.DataFrame, breakout_idx: int
+        self, df: pd.DataFrame, breakout_idx: int, resistance: TrendLine
     ) -> Tuple[str, str, float, float, float, float]:
         """محاكاة الصفقة لحساب التواريخ، المستويات السعرية، والسعر الحالي"""
         entry_price = round(float(df["close"].iloc[breakout_idx]), 2)
-        target_price = round(entry_price * 1.08, 2)  # هدف 8%
-        stop_loss = round(entry_price * 0.95, 2)  # وقف خسارة 5%
+        target_price = round(entry_price * 1.08, 2)  # هدف 8% من سعر الدخول
+        
+        # وقف الخسارة: 5% تحت خط المقاومة
+        res_price_at_breakout = resistance.value_at(breakout_idx)
+        stop_loss = round(res_price_at_breakout * 0.95, 2)
+        
         current_price = round(float(df["close"].iloc[-1]), 2)
 
+        entry_date_dt = pd.to_datetime(df.index[breakout_idx])
         future_df = df.iloc[breakout_idx + 1 :]
 
         for i in range(len(future_df)):
             row = future_df.iloc[i]
+            curr_dt = pd.to_datetime(future_df.index[i])
             curr_date = str(future_df.index[i]).split(" ")[0]
 
+            # تحقق الهدف
             if row["high"] >= target_price:
                 pnl = ((target_price - entry_price) / entry_price) * 100
                 return curr_date, "Win", round(pnl, 2), entry_price, target_price, stop_loss
 
+            # تحقق وقف الخسارة
             if row["low"] <= stop_loss:
                 pnl = ((stop_loss - entry_price) / entry_price) * 100
                 return curr_date, "Loss", round(pnl, 2), entry_price, target_price, stop_loss
 
-        # إذا كانت الصفقة مفتوحة يترك تاريخ الخروج فارغاً
+            # شرط مهلة الانتظار: شهرين (60 يوم تقويمي)
+            if (curr_dt - entry_date_dt).days >= 60:
+                exit_price = round(float(row["close"]), 2)
+                pnl = ((exit_price - entry_price) / entry_price) * 100
+                return curr_date, "Exit Time", round(pnl, 2), entry_price, target_price, stop_loss
+
+        # إذا كانت الصفقة مفتوحة ومستمرة ضمن مدة الشهرين
         unrealized_pnl = ((current_price - entry_price) / entry_price) * 100
         return "", "Open", round(unrealized_pnl, 2), entry_price, target_price, stop_loss
 
@@ -486,7 +500,7 @@ class AscendingTriangleEngine:
 
                 bo_idx = min(struct["breakout_idx"], len(df) - 1)
                 entry_date = str(df.index[bo_idx]).split(" ")[0]
-                exit_date, status, pnl_pct, entry_p, target_p, stop_p = self._simulate_trade(df, bo_idx)
+                exit_date, status, pnl_pct, entry_p, target_p, stop_p = self._simulate_trade(df, bo_idx, resistance)
                 curr_p = round(float(df["close"].iloc[-1]), 2)
 
                 pattern = TrianglePattern(
@@ -667,10 +681,11 @@ if __name__ == "__main__":
             )
             header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
 
-            # ألوان وقواعد التنسيق لحالة الصفقة (Win/Loss/Open)
+            # ألوان وقواعد التنسيق لحالة الصفقة (Win/Loss/Open/Exit Time)
             win_font = Font(name="Calibri", size=11, color="276A3C", bold=True)
             loss_font = Font(name="Calibri", size=11, color="C65911", bold=True)
             open_font = Font(name="Calibri", size=11, color="896800", bold=True)
+            exit_font = Font(name="Calibri", size=11, color="595959", bold=True)
 
             win_fill = PatternFill(
                 start_color="E2EFDA", end_color="E2EFDA", fill_type="solid"
@@ -680,6 +695,9 @@ if __name__ == "__main__":
             )
             open_fill = PatternFill(
                 start_color="FFF2CC", end_color="FFF2CC", fill_type="solid"
+            )
+            exit_fill = PatternFill(
+                start_color="F2F2F2", end_color="F2F2F2", fill_type="solid"
             )
 
             align_center = Alignment(horizontal="center", vertical="center")
@@ -696,8 +714,14 @@ if __name__ == "__main__":
                 status_val = df_results.loc[row_idx - 2, "Status"]
 
                 # اختيار اللون المناسب للصف بناءً على حالة العمود الثامن
-                target_fill = win_fill if status_val == "Win" else (loss_fill if status_val == "Loss" else open_fill)
-                target_font = win_font if status_val == "Win" else (loss_font if status_val == "Loss" else open_font)
+                if status_val == "Win":
+                    target_fill, target_font = win_fill, win_font
+                elif status_val == "Loss":
+                    target_fill, target_font = loss_fill, loss_font
+                elif status_val == "Exit Time":
+                    target_fill, target_font = exit_fill, exit_font
+                else:
+                    target_fill, target_font = open_fill, open_font
 
                 # تنسيق محاذاة الأرقام والتواريخ والألوان للصف بالكامل (8 أعمدة)
                 for col_idx in range(1, 9):
@@ -728,6 +752,10 @@ if __name__ == "__main__":
         print(
             f"❌ الصفقات الخاسرة (Loss):"
             f" {len(df_results[df_results['Status'] == 'Loss'])}"
+        )
+        print(
+            f"⌛ الصفقات المنتهية مهلتها (Exit Time):"
+            f" {len(df_results[df_results['Status'] == 'Exit Time'])}"
         )
         print(
             f"🟡 الصفقات المستمرة (Open):"

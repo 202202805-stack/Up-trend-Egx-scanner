@@ -1,6 +1,3 @@
-# ==============================================================================
-# 1. IMPORTS & COMPREHENSIVE DETECTOR WITH TRADINGVIEW LIVE INTEGRATION
-# ==============================================================================
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
@@ -11,8 +8,40 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 import pandas as pd
 import requests
-import talib
 import yfinance as yf
+
+
+# --- دالة حساب المؤشرات بدون مكتبات خارجية متخصصة ---
+def calc_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+
+def calc_ema(series, span):
+    return series.ewm(span=span, adjust=False).mean()
+
+
+def calc_sma(series, window):
+    return series.rolling(window=window).mean()
+
+
+def calc_trange(high, low, close):
+    prev_close = close.shift(1)
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    return pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+
+def calc_macd(close, fast=6, slow=13, signal=5):
+    ema_fast = calc_ema(close, fast)
+    ema_slow = calc_ema(close, slow)
+    macd_line = ema_fast - ema_slow
+    signal_line = calc_ema(macd_line, signal)
+    return macd_line, signal_line
 
 
 # --- دالة سحب البيانات اللحظية من TradingView ---
@@ -83,7 +112,9 @@ def merge_live_candle(
         df.loc[df.index[-1], "High"] = max(
             df.iloc[-1]["High"], float(tv_row["High"])
         )
-        df.loc[df.index[-1], "Low"] = min(df.iloc[-1]["Low"], float(tv_row["Low"]))
+        df.loc[df.index[-1], "Low"] = min(
+            df.iloc[-1]["Low"], float(tv_row["Low"])
+        )
         df.loc[df.index[-1], "Close"] = float(tv_row["Close"])
 
     return df
@@ -133,22 +164,19 @@ class PipeBottomSignal:
     exit_price: Optional[float] = None
     pnl_percent: float = 0.0
     holding_weeks: int = 0
+    current_price: float = 0.0
 
     def to_dict(self) -> Dict:
         return {
             "Stock Name": self.ticker,
             "Entry Date": self.entry_date.strftime("%Y-%m-%d"),
+            "Entry Price": self.entry_price,
+            "Target": self.target_price,
+            "Stop Loss": self.stop_loss,
             "Exit Date": (
-                self.exit_date.strftime("%Y-%m-%d")
-                if self.exit_date
-                else "Open Position"
+                self.exit_date.strftime("%Y-%m-%d") if self.exit_date else ""
             ),
-            "Win Rate": self.pnl_percent,
-            "Status": (
-                "Win"
-                if self.trade_status == "WIN"
-                else ("Loss" if self.trade_status == "LOSS" else "Open")
-            ),
+            "Current Price": self.current_price,
         }
 
 
@@ -162,21 +190,17 @@ def generate_buy_signals(data):
     open_p = df["Open"].ffill()
     high = df["High"].ffill()
     low = df["Low"].ffill()
-    volume = df["Volume"].ffill()
 
-    rsi = talib.RSI(close, 14)
-    macd_l, macd_s, _ = talib.MACD(close, 6, 13, 5)
-    adx = talib.ADX(high, low, close, 14)
-    ema5 = talib.EMA(close, 5)
-    mfi = talib.MFI(high, low, close, volume, 14)
+    rsi = calc_rsi(close, 14)
+    macd_l, macd_s = calc_macd(close, 6, 13, 5)
+    ema5 = calc_ema(close, 5)
 
-    k_sig = (
-        close > (talib.SMA(close, 10) + talib.TRANGE(high, low, close) * 1.5)
-    ).astype(int)
+    trange = calc_trange(high, low, close)
+    k_sig = (close > (calc_sma(close, 10) + trange * 1.5)).astype(int)
     a_sig = (
-        (close > talib.SMA(close, 8))
-        & (close > talib.SMA(close, 5))
-        & (close > talib.SMA(close, 3))
+        (close > calc_sma(close, 8))
+        & (close > calc_sma(close, 5))
+        & (close > calc_sma(close, 3))
     ).astype(int)
     m_sig = ((close - close.shift(7)) > 0).astype(int)
     sig_count = k_sig + a_sig + m_sig
@@ -187,13 +211,9 @@ def generate_buy_signals(data):
             score += 2.0
         if close.iloc[idx] > ema5.iloc[idx]:
             score += 1.0
-        if adx.iloc[idx] > 20:
-            score += 1.0
         if rsi.iloc[idx] > 50:
             score += 2.0
         if sig_count.iloc[idx] >= 2:
-            score += 2.0
-        if mfi.iloc[idx] > 50:
             score += 2.0
         return min(score, 10.0)
 
@@ -291,7 +311,9 @@ class PipeBottomDetector:
                 if len(weekly_sub) >= 10
                 else price
             )
-            return MarketCondition.BULL if price >= ma50 else MarketCondition.BEAR
+            return (
+                MarketCondition.BULL if price >= ma50 else MarketCondition.BEAR
+            )
         except:
             return MarketCondition.BULL
 
@@ -366,7 +388,9 @@ class PipeBottomDetector:
         entry_price: float,
         target_price: float,
         stop_loss: float,
-    ) -> Tuple[str, Optional[pd.Timestamp], Optional[float], float, int, pd.Timestamp]:
+    ) -> Tuple[
+        str, Optional[pd.Timestamp], Optional[float], float, int, pd.Timestamp
+    ]:
         future_daily = self.daily_data.loc[
             self.daily_data.index > confirmation_date
         ]
@@ -383,7 +407,7 @@ class PipeBottomDetector:
                 holding_weeks = max(1, days_held // 5)
                 return "WIN", idx, target_price, pnl, holding_weeks, idx
 
-        # معالجة الصفقة المفتوحة حتى أحدث شمعة
+        # إذا كانت الصفقة لسه مفتوحة
         last_price = self.daily_data.iloc[-1]["Close"]
         pnl = (last_price - entry_price) / entry_price
         holding_weeks = max(1, len(future_daily) // 5)
@@ -403,6 +427,7 @@ class PipeBottomDetector:
             return signals
 
         last_trade_exit_date = pd.Timestamp.min
+        latest_current_price = float(self.daily_data.iloc[-1]["Close"])
 
         for i in range(10, len(df) - 1):
             left_idx, right_idx = i, i + 1
@@ -464,7 +489,9 @@ class PipeBottomDetector:
             stop_loss = round(pipe_low * (1.0 - self.stop_buffer_pct), 2)
 
             target_pct = (
-                (target_price - entry_price) / entry_price if entry_price > 0 else 0.0
+                (target_price - entry_price) / entry_price
+                if entry_price > 0
+                else 0.0
             )
 
             risk = entry_price - stop_loss
@@ -507,13 +534,16 @@ class PipeBottomDetector:
                 prior_drop_pct=drop_pct,
                 market_condition=market_cond,
                 quality_rating=(
-                    PipeQuality.EXCELLENT if drop_pct > 0.20 else PipeQuality.GOOD
+                    PipeQuality.EXCELLENT
+                    if drop_pct > 0.20
+                    else PipeQuality.GOOD
                 ),
                 trade_status=status,
                 exit_date=exit_date,
                 exit_price=exit_price,
                 pnl_percent=pnl_pct,
                 holding_weeks=holding_weeks,
+                current_price=latest_current_price,
             )
 
             signals.append(signal)
@@ -521,62 +551,259 @@ class PipeBottomDetector:
         return signals
 
 
-# ==============================================================================
-# 2. EXECUTE SCAN & BACKTEST (1 YEAR PERIOD)
-# ==============================================================================
+# قائمة الأسهم
 tickers = [
-    "AALR.CA", "ABUK.CA", "ACAMD.CA", "ACAP.CA", "ACGC.CA", "ACTF.CA", "ADCI.CA",
-    "ADIB.CA", "ADPC.CA", "ADRI.CA", "AFDI.CA", "AFMC.CA", "AIDC.CA", "AIFI.CA",
-    "AIH.CA", "AJWA.CA", "ALCN.CA", "ALEX.CA", "ALUM.CA", "AMER.CA", "AMES.CA",
-    "AMIA.CA", "AMII.CA", "AMOC.CA", "AMPI.CA", "APSW.CA", "ARAB.CA", "ARCC.CA",
-    "AREH.CA", "ASCM.CA", "ASPI.CA", "ATLC.CA", "ATQA.CA", "AXPH.CA", "BIDI.CA",
-    "BIGP.CA", "BINV.CA", "BIOC.CA", "BONY.CA", "BTFH.CA", "CAED.CA", "CANA.CA",
-    "CCAP.CA", "CCRS.CA", "CEFM.CA", "CERA.CA", "CFGH.CA", "CICH.CA", "CIEB.CA",
-    "CIRA.CA", "CLHO.CA", "CNFN.CA", "COMI.CA", "COPR.CA", "COSG.CA", "CPCI.CA",
-    "CPME.CA", "CRST.CA", "CSAG.CA", "DAPH.CA", "DCRC.CA", "DEIN.CA", "DGTZ.CA",
-    "DOMT.CA", "DSCW.CA", "DTPP.CA", "EALR.CA", "EASB.CA", "EAST.CA", "EBSC.CA",
-    "ECAP.CA", "EDFM.CA", "EEII.CA", "EFIC.CA", "EFID.CA", "EFIH.CA", "EGAL.CA",
-    "EGAS.CA", "EGBE.CA", "EGCH.CA", "EGREF.CA", "EGSA.CA", "EGTS.CA", "EHDR.CA",
-    "ELAB.CA", "ELEC.CA", "ELKA.CA", "ELNA.CA", "ELSH.CA", "ELWA.CA", "EMFD.CA",
-    "ENGC.CA", "EOSB.CA", "EPCO.CA", "EPPK.CA", "ETEL.CA", "ETRS.CA", "EXPA.CA",
-    "FAIT.CA", "FAITA.CA", "FCMD.CA", "FIRE.CA", "FNAR.CA", "FTNS.CA", "FWRY.CA",
-    "GBCO.CA", "GDWA.CA", "GGCC.CA", "GGRN.CA", "GIHD.CA", "GMCI.CA", "GOUR.CA",
-    "GPIM.CA", "GRCA.CA", "GSSC.CA", "GTEX.CA", "GTHE.CA", "GTWL.CA", "HBCO.CA",
-    "HDBK.CA", "HELI.CA", "HRHO.CA", "IBCT.CA", "ICFC.CA", "ICID.CA", "IDRE.CA",
-    "IEEC.CA", "IFAP.CA", "INEG.CA", "INFI.CA", "IRON.CA", "ISMA.CA", "ISMQ.CA",
-    "ISPH.CA", "JUFO.CA", "KABO.CA", "KORA.CA", "KRDI.CA", "KWIN.CA", "KZPC.CA",
-    "LCSW.CA", "LKGP.CA", "LUTS.CA", "MAAL.CA", "MASR.CA", "MBEG.CA", "MBSC.CA",
-    "MCQE.CA", "MCRO.CA", "MENA.CA", "MEPA.CA", "MFPC.CA", "MFSC.CA", "MHOT.CA",
-    "MICH.CA", "MILS.CA", "MIPH.CA", "MOED.CA", "MOIL.CA", "MOIN.CA", "MOSC.CA",
-    "MPCI.CA", "MPCO.CA", "MPRC.CA", "MTIE.CA", "NAHO.CA", "NARE.CA", "NCCW.CA",
-    "NCGC.CA", "NEDA.CA", "NHPS.CA", "NINH.CA", "NIPH.CA", "OBRI.CA", "OCAP.CA",
-    "OCDI.CA", "OCPH.CA", "ODIN.CA", "OFH.CA", "OIH.CA", "OLFI.CA", "ORAS.CA",
-    "ORHD.CA", "ORWE.CA", "PHAR.CA", "PHDC.CA", "PHGC.CA", "PHTV.CA", "POUL.CA",
-    "PRCL.CA", "PRDC.CA", "PRMH.CA", "QNBE.CA", "RACC.CA", "RAKT.CA", "RAYA.CA",
-    "RKAZ.CA", "RMDA.CA", "RMTV.CA", "ROTO.CA", "RREI.CA", "RTVC.CA", "RUBX.CA",
-    "SAUD.CA", "SCEM.CA", "SCFM.CA", "SCTS.CA", "SDTI.CA", "SEIG.CA", "SIEG.CA",
-    "SIPC.CA", "SKPC.CA", "SMFR.CA", "SNFC.CA", "SPIN.CA", "SPMD.CA", "SUCE.CA",
-    "SUGR.CA", "SVCE.CA", "SWDY.CA", "TALM.CA", "TANM.CA", "TAQA.CA", "TMGH.CA",
-    "TORA.CA", "TWSA.CA", "TYCN.CA", "UBEE.CA", "UEFM.CA", "UEGC.CA", "UNIP.CA",
-    "UNIT.CA", "UPMS.CA", "UTOP.CA", "VALU.CA", "VERT.CA", "VLMR.CA", "VLMRA.CA",
-    "WCDF.CA", "WKOL.CA", "ZEOT.CA", "ZMID.CA",
+    "AALR.CA",
+    "ABUK.CA",
+    "ACAMD.CA",
+    "ACAP.CA",
+    "ACGC.CA",
+    "ACTF.CA",
+    "ADCI.CA",
+    "ADIB.CA",
+    "ADPC.CA",
+    "ADRI.CA",
+    "AFDI.CA",
+    "AFMC.CA",
+    "AIDC.CA",
+    "AIFI.CA",
+    "AIH.CA",
+    "AJWA.CA",
+    "ALCN.CA",
+    "ALEX.CA",
+    "ALUM.CA",
+    "AMER.CA",
+    "AMES.CA",
+    "AMIA.CA",
+    "AMII.CA",
+    "AMOC.CA",
+    "AMPI.CA",
+    "APSW.CA",
+    "ARAB.CA",
+    "ARCC.CA",
+    "AREH.CA",
+    "ASCM.CA",
+    "ASPI.CA",
+    "ATLC.CA",
+    "ATQA.CA",
+    "AXPH.CA",
+    "BIDI.CA",
+    "BIGP.CA",
+    "BINV.CA",
+    "BIOC.CA",
+    "BONY.CA",
+    "BTFH.CA",
+    "CAED.CA",
+    "CANA.CA",
+    "CCAP.CA",
+    "CCRS.CA",
+    "CEFM.CA",
+    "CERA.CA",
+    "CFGH.CA",
+    "CICH.CA",
+    "CIEB.CA",
+    "CIRA.CA",
+    "CLHO.CA",
+    "CNFN.CA",
+    "COMI.CA",
+    "COPR.CA",
+    "COSG.CA",
+    "CPCI.CA",
+    "CPME.CA",
+    "CRST.CA",
+    "CSAG.CA",
+    "DAPH.CA",
+    "DCRC.CA",
+    "DEIN.CA",
+    "DGTZ.CA",
+    "DOMT.CA",
+    "DSCW.CA",
+    "DTPP.CA",
+    "EALR.CA",
+    "EASB.CA",
+    "EAST.CA",
+    "EBSC.CA",
+    "ECAP.CA",
+    "EDFM.CA",
+    "EEII.CA",
+    "EFIC.CA",
+    "EFID.CA",
+    "EFIH.CA",
+    "EGAL.CA",
+    "EGAS.CA",
+    "EGBE.CA",
+    "EGCH.CA",
+    "EGREF.CA",
+    "EGSA.CA",
+    "EGTS.CA",
+    "EHDR.CA",
+    "ELAB.CA",
+    "ELEC.CA",
+    "ELKA.CA",
+    "ELNA.CA",
+    "ELSH.CA",
+    "ELWA.CA",
+    "EMFD.CA",
+    "ENGC.CA",
+    "EOSB.CA",
+    "EPCO.CA",
+    "EPPK.CA",
+    "ETEL.CA",
+    "ETRS.CA",
+    "EXPA.CA",
+    "FAIT.CA",
+    "FAITA.CA",
+    "FCMD.CA",
+    "FIRE.CA",
+    "FNAR.CA",
+    "FTNS.CA",
+    "FWRY.CA",
+    "GBCO.CA",
+    "GDWA.CA",
+    "GGCC.CA",
+    "GGRN.CA",
+    "GIHD.CA",
+    "GMCI.CA",
+    "GOUR.CA",
+    "GPIM.CA",
+    "GRCA.CA",
+    "GSSC.CA",
+    "GTEX.CA",
+    "GTHE.CA",
+    "GTWL.CA",
+    "HBCO.CA",
+    "HDBK.CA",
+    "HELI.CA",
+    "HRHO.CA",
+    "IBCT.CA",
+    "ICFC.CA",
+    "ICID.CA",
+    "IDRE.CA",
+    "IEEC.CA",
+    "IFAP.CA",
+    "INEG.CA",
+    "INFI.CA",
+    "IRON.CA",
+    "ISMA.CA",
+    "ISMQ.CA",
+    "ISPH.CA",
+    "JUFO.CA",
+    "KABO.CA",
+    "KORA.CA",
+    "KRDI.CA",
+    "KWIN.CA",
+    "KZPC.CA",
+    "LCSW.CA",
+    "LKGP.CA",
+    "LUTS.CA",
+    "MAAL.CA",
+    "MASR.CA",
+    "MBEG.CA",
+    "MBSC.CA",
+    "MCQE.CA",
+    "MCRO.CA",
+    "MENA.CA",
+    "MEPA.CA",
+    "MFPC.CA",
+    "MFSC.CA",
+    "MHOT.CA",
+    "MICH.CA",
+    "MILS.CA",
+    "MIPH.CA",
+    "MOED.CA",
+    "MOIL.CA",
+    "MOIN.CA",
+    "MOSC.CA",
+    "MPCI.CA",
+    "MPCO.CA",
+    "MPRC.CA",
+    "MTIE.CA",
+    "NAHO.CA",
+    "NARE.CA",
+    "NCCW.CA",
+    "NCGC.CA",
+    "NEDA.CA",
+    "NHPS.CA",
+    "NINH.CA",
+    "NIPH.CA",
+    "OBRI.CA",
+    "OCAP.CA",
+    "OCDI.CA",
+    "OCPH.CA",
+    "ODIN.CA",
+    "OFH.CA",
+    "OIH.CA",
+    "OLFI.CA",
+    "ORAS.CA",
+    "ORHD.CA",
+    "ORWE.CA",
+    "PHAR.CA",
+    "PHDC.CA",
+    "PHGC.CA",
+    "PHTV.CA",
+    "POUL.CA",
+    "PRCL.CA",
+    "PRDC.CA",
+    "PRMH.CA",
+    "QNBE.CA",
+    "RACC.CA",
+    "RAKT.CA",
+    "RAYA.CA",
+    "RKAZ.CA",
+    "RMDA.CA",
+    "RMTV.CA",
+    "ROTO.CA",
+    "RREI.CA",
+    "RTVC.CA",
+    "RUBX.CA",
+    "SAUD.CA",
+    "SCEM.CA",
+    "SCFM.CA",
+    "SCTS.CA",
+    "SDTI.CA",
+    "SEIG.CA",
+    "SIEG.CA",
+    "SIPC.CA",
+    "SKPC.CA",
+    "SMFR.CA",
+    "SNFC.CA",
+    "SPIN.CA",
+    "SPMD.CA",
+    "SUCE.CA",
+    "SUGR.CA",
+    "SVCE.CA",
+    "SWDY.CA",
+    "TALM.CA",
+    "TANM.CA",
+    "TAQA.CA",
+    "TMGH.CA",
+    "TORA.CA",
+    "TWSA.CA",
+    "TYCN.CA",
+    "UBEE.CA",
+    "UEFM.CA",
+    "UEGC.CA",
+    "UNIP.CA",
+    "UNIT.CA",
+    "UPMS.CA",
+    "UTOP.CA",
+    "VALU.CA",
+    "VERT.CA",
+    "VLMR.CA",
+    "VLMRA.CA",
+    "WCDF.CA",
+    "WKOL.CA",
+    "ZEOT.CA",
+    "ZMID.CA",
 ]
 
-# 1. جلب الأسعار اللحظية من TradingView
-print("🌐 Fetching live session data from TradingView...")
 df_tv_live = fetch_tradingview_live_data()
 
-# 2. تحديد المدى الزمني لسنة واحدة فقط (1 Year)
 end_date = datetime.now()
 start_date = end_date - timedelta(days=365 + 60)
 
 all_signals_dicts = []
-raw_signals_list = []
 
-print(
-    "📈 Downloading 1-Year historical data, merging live prices, scanning"
-    " Pipe Bottoms..."
-)
 for ticker in tickers:
     try:
         df = yf.download(
@@ -601,8 +828,6 @@ for ticker in tickers:
             continue
 
         df = df[cols].dropna()
-
-        # دمج شمعة اليوم الحالية المباشرة
         df = merge_live_candle(df, ticker, df_tv_live)
 
         detector = PipeBottomDetector(
@@ -614,124 +839,75 @@ for ticker in tickers:
         signals = detector.detect()
 
         for sig in signals:
-            raw_signals_list.append(sig)
             all_signals_dicts.append(sig.to_dict())
     except Exception as e:
         pass
 
-# ==============================================================================
-# 3. STATISTICAL SUMMARY PRINT & EXACT IMAGE MATCHING EXCEL EXPORT
-# ==============================================================================
-if raw_signals_list:
+if all_signals_dicts:
     df_results = pd.DataFrame(all_signals_dicts)
-
-    # إزالة التكرارات للصفقات بنفس تاريخ الدخول والسهم
     df_results = df_results.drop_duplicates(subset=["Stock Name", "Entry Date"])
-
     df_results["Entry Date"] = pd.to_datetime(df_results["Entry Date"])
-    df_results = df_results.sort_values(
-        by="Entry Date", ascending=True
-    ).reset_index(drop=True)
-    df_results["Entry Date"] = df_results["Entry Date"].dt.strftime("%Y-%m-%d")
-
-    total_trades = len(df_results)
-    win_trades = df_results[df_results["Status"] == "Win"]
-    loss_trades = df_results[df_results["Status"] == "Loss"]
-    open_trades = df_results[df_results["Status"] == "Open"]
-
-    total_closed = len(win_trades) + len(loss_trades)
-    win_rate = (len(win_trades) / total_closed * 100) if total_closed > 0 else 0.0
-
-    avg_pnl = df_results["Win Rate"].mean() * 100
-
-    print("\n" + "=" * 80)
-    print("📊 ملخص نتائج فحص آخر سنة (1 YEAR SCAN STATISTICAL SUMMARY)")
-    print("=" * 80)
-    print(f"🔹 إجمالي عدد الصفقات الكلية (Total Trades): {total_trades}")
-    print(f"✅ عدد الصفقات الناجحة (Win): {len(win_trades)}")
-    print(f"❌ عدد الصفقات الخاسرة (Loss): {len(loss_trades)}")
-    print(f"🔵 عدد الصفقات المستمرة (Open): {len(open_trades)}")
-    print(
-        f"🎯 نسبة نجاح الصفقات (Win Rate): {win_rate:.2f}% (من الصفقات المغلقة)"
+    df_results = df_results.sort_values(by="Entry Date", ascending=True).reset_index(
+        drop=True
     )
-    print(f"📈 متوسط العائد لكل صفقة: {avg_pnl:+.2f}%")
-    print("=" * 80 + "\n")
-
-    output_excel = "Pipe_Bottom_EGX_1Year_Results.xlsx"
-
-    with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
-        df_results.to_excel(writer, sheet_name="Sheet1", index=False)
-        workbook = writer.book
-        worksheet = writer.sheets["Sheet1"]
-
-        # التنسيقات والألوان
-        header_fill = PatternFill(
-            start_color="1F385C", end_color="1F385C", fill_type="solid"
-        )  # Dark Blue
-        win_fill = PatternFill(
-            start_color="E2EFDA", end_color="E2EFDA", fill_type="solid"
-        )  # Soft Green
-        loss_fill = PatternFill(
-            start_color="FCE4D6", end_color="FCE4D6", fill_type="solid"
-        )  # Soft Red
-        open_fill = PatternFill(
-            start_color="D9E1F2", end_color="D9E1F2", fill_type="solid"
-        )  # Soft Blue
-
-        header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-        data_font = Font(name="Calibri", size=11, color="000000")
-        win_font = Font(name="Calibri", size=11, bold=True, color="276A3C")
-        loss_font = Font(name="Calibri", size=11, bold=True, color="C00000")
-        open_font = Font(name="Calibri", size=11, bold=True, color="1F497D")
-
-        center_align = Alignment(horizontal="center", vertical="center")
-
-        thin_border = Border(
-            left=Side(style="thin", color="D9D9D9"),
-            right=Side(style="thin", color="D9D9D9"),
-            top=Side(style="thin", color="D9D9D9"),
-            bottom=Side(style="thin", color="D9D9D9"),
-        )
-
-        # 1. تنسيق رأس الجدول (Header)
-        for col_num in range(1, 6):
-            cell = worksheet.cell(row=1, column=col_num)
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = center_align
-
-        # 2. تنسيق البيانات والتلوين الشرطي
-        for row_num in range(2, len(df_results) + 2):
-            status = worksheet.cell(row=row_num, column=5).value
-
-            for col_num in range(1, 6):
-                cell = worksheet.cell(row=row_num, column=col_num)
-                cell.alignment = center_align
-                cell.font = data_font
-                cell.border = thin_border
-
-            # تنسيق نسبة الربح/الخسارة D
-            cell_d = worksheet.cell(row=row_num, column=4)
-            cell_d.number_format = "0.00%"
-
-            # تطبيق ألوان الحالة E
-            cell_e = worksheet.cell(row=row_num, column=5)
-            if status == "Win":
-                cell_e.fill = win_fill
-                cell_e.font = win_font
-            elif status == "Loss":
-                cell_e.fill = loss_fill
-                cell_e.font = loss_font
-            elif status == "Open":
-                cell_e.fill = open_fill
-                cell_e.font = open_font
-
-        # 3. ضبط عرض الأعمدة
-        for col in worksheet.columns:
-            max_len = max(len(str(cell.value or "")) for cell in col)
-            col_letter = get_column_letter(col[0].column)
-            worksheet.column_dimensions[col_letter].width = max(max_len + 5, 14)
-
-    print(f"💾 تم حفظ ملف الإكسيل بنجاح باسم: {output_excel}")
+    df_results["Entry Date"] = df_results["Entry Date"].dt.strftime("%Y-%m-%d")
 else:
-    print("لم يتم العثور على أي صفقات تطابق الشروط خلال السنة الأخيرة.")
+    df_results = pd.DataFrame(
+        columns=[
+            "Stock Name",
+            "Entry Date",
+            "Entry Price",
+            "Target",
+            "Stop Loss",
+            "Exit Date",
+            "Current Price",
+        ]
+    )
+
+output_excel = "Pipe_Bottom_EGX_Results.xlsx"
+
+with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
+    df_results.to_excel(writer, sheet_name="Sheet1", index=False)
+    workbook = writer.book
+    worksheet = writer.sheets["Sheet1"]
+
+    header_fill = PatternFill(
+        start_color="1F385C", end_color="1F385C", fill_type="solid"
+    )
+    header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    data_font = Font(name="Calibri", size=11, color="000000")
+    center_align = Alignment(horizontal="center", vertical="center")
+
+    thin_border = Border(
+        left=Side(style="thin", color="D9D9D9"),
+        right=Side(style="thin", color="D9D9D9"),
+        top=Side(style="thin", color="D9D9D9"),
+        bottom=Side(style="thin", color="D9D9D9"),
+    )
+
+    # 1. Header Styling
+    for col_num in range(1, len(df_results.columns) + 1):
+        cell = worksheet.cell(row=1, column=col_num)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = center_align
+
+    # 2. Data Formatting
+    for row_num in range(2, len(df_results) + 2):
+        for col_num in range(1, len(df_results.columns) + 1):
+            cell = worksheet.cell(row=row_num, column=col_num)
+            cell.alignment = center_align
+            cell.font = data_font
+            cell.border = thin_border
+
+            # Number format for prices
+            if col_num in [3, 4, 5, 7] and isinstance(cell.value, (int, float)):
+                cell.number_format = "#,##0.00"
+
+    # 3. Column Widths
+    for col in worksheet.columns:
+        max_len = max(len(str(cell.value or "")) for cell in col)
+        col_letter = get_column_letter(col[0].column)
+        worksheet.column_dimensions[col_letter].width = max(max_len + 5, 16)
+
+print(f"Excel generated successfully: {output_excel}")

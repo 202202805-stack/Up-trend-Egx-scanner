@@ -265,7 +265,7 @@ class AdamAdamDetector:
 # ==============================================================================
 def get_combined_stock_data():
     end_date = datetime.datetime.now()
-    start_date = end_date - datetime.timedelta(days=365) # الاعتماد على آخر سنة واحدة فقط
+    start_date = end_date - datetime.timedelta(days=365)
 
     print("1️⃣ جلب أحدث البيانات اللحظية من TradingView...")
     tv_url = "https://scanner.tradingview.com/egypt/scan"
@@ -317,7 +317,6 @@ def get_combined_stock_data():
             if ticker in bulk_data.columns.levels[0]:
                 df_stock = bulk_data[ticker].dropna(how='all').copy()
                 
-                # إضافة أحدث أسعار من TradingView إذا كانت أحدث من بيانات Yahoo Finance
                 if ticker in tv_dict:
                     last_tv_data = tv_dict[ticker]
                     if df_stock.empty or df_stock.index[-1].date() < today_date.date():
@@ -333,7 +332,7 @@ def get_combined_stock_data():
     return combined_data
 
 # ==============================================================================
-# 4. المعالجة المتوازية ورصد الصفقات (المغلقة والمفتوحة)
+# 4. المعالجة المتوازية ورصد الصفقات (المغلقة والمفتوحة) مع تحديث الـ State
 # ==============================================================================
 all_stock_datasets = get_combined_stock_data()
 
@@ -364,6 +363,7 @@ def process_single_stock(ticker, hold_days=60):
         target_price = pattern.price_target or entry_price * 1.2
 
         exit_date = None
+        state = 'Open'
 
         # فحص حركة السهم بعد تاريخ الدخول
         for i in range(1, len(df_stock) - entry_idx):
@@ -373,26 +373,34 @@ def process_single_stock(ticker, hold_days=60):
 
             if current_low <= stop_price:
                 exit_date = df_stock.index[current_idx]
+                state = 'Loss'
                 break
 
             if current_high >= target_price:
                 exit_date = df_stock.index[current_idx]
+                state = 'Win'
                 break
             
             # إنهاء الصفقات بعد تجاوز فترة الاحتفاظ الإجمالية
             if i >= hold_days:
                 exit_date = df_stock.index[current_idx]
+                close_p = df_stock['Close'].iloc[current_idx]
+                state = 'Win' if close_p >= entry_price else 'Loss'
                 break
 
-        # تنسيق الأعمدة المطلوبة بالتحديد
+        # تاريخ الخروج يترك فارغاً إذا كانت الصفقة Open
+        formatted_exit_date = exit_date.strftime('%Y-%m-%d') if (state != 'Open' and hasattr(exit_date, 'strftime') and exit_date) else ''
+
+        # تنسيق الأعمدة الثمانية المطلوبة باللغة الإنجليزية
         trades.append({
             'Stock Name': ticker,
             'Entry Date': pattern.confirmation_date.strftime('%Y-%m-%d') if pattern.confirmation_date else '',
             'Entry Price': round(entry_price, 2),
             'Target': round(target_price, 2),
             'Stop Loss': round(stop_price, 2),
-            'Exit Date': exit_date.strftime('%Y-%m-%d') if hasattr(exit_date, 'strftime') and exit_date else '',
-            'Current Price': round(latest_price, 2)
+            'Exit Date': formatted_exit_date,
+            'Current Price': round(latest_price, 2),
+            'State': state
         })
 
     return trades
@@ -405,7 +413,7 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
         all_trades.extend(res)
 
 # ==============================================================================
-# 5. التنسيق وإصدار ملف Excel المفصل
+# 5. التنسيق وإصدار ملف Excel المفصل بالتصميم والألوان المحددة
 # ==============================================================================
 df_trades = pd.DataFrame(all_trades)
 
@@ -425,6 +433,16 @@ def format_excel_file(excel_filename: str):
         bottom=Side(style='thin', color='D9D9D9')
     )
 
+    # التنسيق الشرطي لحالة الصفقة (State)
+    win_fill = PatternFill(start_color="D4EDDA", end_color="D4EDDA", fill_type="solid")
+    win_font = Font(name="Segoe UI", size=10, bold=True, color="155724")
+
+    loss_fill = PatternFill(start_color="F8D7DA", end_color="F8D7DA", fill_type="solid")
+    loss_font = Font(name="Segoe UI", size=10, bold=True, color="721C24")
+
+    open_fill = PatternFill(start_color="FFF3CD", end_color="FFF3CD", fill_type="solid")
+    open_font = Font(name="Segoe UI", size=10, bold=True, color="856404")
+
     ws.row_dimensions[1].height = 26
     for col in range(1, ws.max_column + 1):
         cell = ws.cell(row=1, column=col)
@@ -440,11 +458,26 @@ def format_excel_file(excel_filename: str):
             cell.border = thin_border
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    column_widths = {'A': 18, 'B': 16, 'C': 16, 'D': 16, 'E': 16, 'F': 16, 'G': 16}
+            # تطبيق التلوين الذكي لعمود State
+            if col == 8:
+                val = str(cell.value).strip()
+                if val == 'Win':
+                    cell.fill = win_fill
+                    cell.font = win_font
+                elif val == 'Loss':
+                    cell.fill = loss_fill
+                    cell.font = loss_font
+                elif val == 'Open':
+                    cell.fill = open_fill
+                    cell.font = open_font
+
+    column_widths = {'A': 18, 'B': 16, 'C': 16, 'D': 16, 'E': 16, 'F': 16, 'G': 16, 'H': 14}
     for col_letter, width in column_widths.items():
         ws.column_dimensions[col_letter].width = width
 
     wb.save(excel_filename)
+
+excel_filename = "Adam_Adam_Pattern_Single_Sheet.xlsx"
 
 if not df_trades.empty:
     # 🛑 1. منع تكرار الصفقات بنفس السهم وتاريخ الدخول
@@ -454,8 +487,13 @@ if not df_trades.empty:
     df_trades['Entry Date Temp'] = pd.to_datetime(df_trades['Entry Date'])
     df_trades = df_trades.sort_values(by='Entry Date Temp', ascending=True).drop(columns=['Entry Date Temp'])
 
-    excel_filename = "Adam_Adam_Pattern_Single_Sheet.xlsx"
-    
+    # 3. التأكد من ترتيب الأعمدة المطلوب
+    required_columns = [
+        'Stock Name', 'Entry Date', 'Entry Price', 'Target', 
+        'Stop Loss', 'Exit Date', 'Current Price', 'State'
+    ]
+    df_trades = df_trades[required_columns]
+
     try:
         with pd.ExcelWriter(excel_filename, engine='openpyxl') as writer:
             df_trades.to_excel(writer, sheet_name='Trades List', index=False)
@@ -466,4 +504,11 @@ if not df_trades.empty:
     except PermissionError:
         print(f"\n❌ يرجى إغلاق ملف '{excel_filename}' من Excel أولاً ثم إعادة التشغيل!")
 else:
-    print("\n⚠️ لم يتم العثور على أي صفقات تطابق الشروط خلال آخر سنة.")
+    df_empty = pd.DataFrame(columns=[
+        'Stock Name', 'Entry Date', 'Entry Price', 'Target', 
+        'Stop Loss', 'Exit Date', 'Current Price', 'State'
+    ])
+    with pd.ExcelWriter(excel_filename, engine='openpyxl') as writer:
+        df_empty.to_excel(writer, sheet_name='Trades List', index=False)
+    format_excel_file(excel_filename)
+    print("\n⚠️ لم يتم العثور على أي صفقات تطابق الشروط خلال آخر سنة، وتم إنشاء الهيكل الفارغ بنجاح.")

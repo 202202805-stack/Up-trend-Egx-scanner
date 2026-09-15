@@ -253,7 +253,7 @@ class HSBottomDetector:
                 continue
                 
             pat = self._validate(df, closes, highs, lows, sma, symbol,
-                                 ls_i, ls_p, p1_i, p1_p, h_i, h_p, p2_i, p2_p, rs_i, rs_p)
+                                  ls_i, ls_p, p1_i, p1_p, h_i, h_p, p2_i, p2_p, rs_i, rs_p)
             if pat is not None:
                 patterns.append(pat)
                 
@@ -391,7 +391,6 @@ class HSBottomDetector:
             risk = pat.entry - pat.stop_loss
             pat.risk_reward = (pat.target - pat.entry) / risk if risk > 0 else np.nan
 
-            # تتبع الصفقة حتى الهدف أو وقف الخسارة أو استمرار فتحها
             hit_win = False
             hit_loss = False
             exit_idx = None
@@ -417,7 +416,7 @@ class HSBottomDetector:
             else:
                 pat.status = "OPEN"
                 pat.hit_target = None
-                pat.exit_date = ""  # يبقى فارغًا للصفقات المفتوحة
+                pat.exit_date = ""
 
         return patterns
 
@@ -438,7 +437,6 @@ def run_egx_backtest(symbols_list):
     detector = HSBottomDetector(config)
     all_trades = []
     
-    # باك تست لمدة سنة واحدة فقط (365 يوم)
     end_date = datetime.today().strftime('%Y-%m-%d')
     start_date = (datetime.today() - timedelta(days=365)).strftime('%Y-%m-%d')
     
@@ -470,7 +468,6 @@ def run_egx_backtest(symbols_list):
             detector.evaluate(df, patterns)
             
             for pat in patterns:
-                # تضمين الصفقات المغلقة (WIN / LOSS) والصفقات المفتوحة (OPEN)
                 if pat.status not in ["WIN", "LOSS", "OPEN"]:
                     continue
 
@@ -494,19 +491,39 @@ def run_egx_backtest(symbols_list):
     if all_trades:
         results_df = pd.DataFrame(all_trades)
         
-        # ترتيب الصفقات من الأقدم إلى الأحدث حسب تاريخ الدخول (Entry Date)
         results_df['Entry Date'] = pd.to_datetime(results_df['Entry Date'])
         results_df = results_df.sort_values(by='Entry Date', ascending=True).reset_index(drop=True)
         results_df['Entry Date'] = results_df['Entry Date'].dt.strftime('%Y-%m-%d')
 
         output_filename = "head_and_shoulders_bottom_results.xlsx"
         
-        # حفظ النتائج في صفحة واحدة تحت اسم All Trades List
         with pd.ExcelWriter(output_filename, engine='openpyxl') as writer:
             results_df.to_excel(writer, sheet_name='All Trades List', index=False)
 
         print(f"\n[تم بنجاح] تم حفظ جميع الصفقات والنتائج في الملف: {output_filename}")
         print(f"إجمالي عدد الصفقات المسجلة: {len(results_df)}")
+
+        # ===================================================================
+        # طباعة الصفقات المفتوحة في التيرمنال
+        # ===================================================================
+        open_trades = results_df[results_df['Status'] == 'OPEN'].copy()
+
+        print("\n" + "="*80)
+        print(f"🔥 قائمة الصفقات المفتوحة (ACTIVE OPEN TRADES) - العدد الإجمالي: {len(open_trades)}")
+        print("="*80)
+
+        if not open_trades.empty:
+            open_trades['Gain/Loss %'] = (
+                (open_trades['Current Price'] - open_trades['Entry Price']) / open_trades['Entry Price'] * 100
+            ).round(2).astype(str) + '%'
+
+            display_cols = ['Stock Name', 'Entry Date', 'Entry Price', 'Current Price', 'Gain/Loss %', 'Target', 'Stop Loss']
+            print(open_trades[display_cols].to_string(index=False))
+        else:
+            print("لا توجد صفقات مفتوحة حاليًا.")
+            
+        print("="*80 + "\n")
+
         return results_df
     else:
         print("\n[تنبيه] لم يتم العثور على صفقات مطابقة بالشروط المحددة.")

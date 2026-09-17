@@ -1,3 +1,11 @@
+
+import sys
+import subprocess
+
+# تثبيت المكتبات المطلوبة تلقائياً في حال عدم وجودها
+subprocess.check_call([sys.executable, "-m", "pip", "install", "yfinance", "scipy", "openpyxl"])
+
+import os
 import math
 import warnings
 from dataclasses import dataclass, field
@@ -8,6 +16,9 @@ import numpy as np
 import pandas as pd
 from scipy.signal import argrelextrema
 import yfinance as yf
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
 warnings.filterwarnings('ignore')
 
@@ -21,7 +32,7 @@ class CHSBConfig:
     pivot_window: int = 5
     min_head_depth_pct: float = 0.015
     max_head_depth_pct: float = 0.60
-    max_shoulder_price_asymmetry_pct: float = 0.12
+    max_shoulder_price_asymmetry_pct: float = 0.05
     max_shoulder_time_asymmetry_pct: float = 0.35
     min_shoulder_above_head_pct: float = 0.01
     min_extra_shoulder_pairs: int = 1
@@ -281,7 +292,7 @@ def _classify_slope(nl_left: NecklinePoint, nl_right: NecklinePoint, cfg: CHSBCo
     return "up" if slope_pct > 0 else "down"
 
 
-def _find_breakout(df: pd.DataFrame, formation_end_idx: int, nl_left: NecklinePoint, nl_right: NecklinePoint, slope_class: str, head_low: float, right_shoulder_idx: int, cfg: CHSBConfig) -> dict:
+def _find_breakout(df: pd.DataFrame, orig_df: pd.DataFrame, formation_end_idx: int, nl_left: NecklinePoint, nl_right: NecklinePoint, slope_class: str, head_low: float, right_shoulder_idx: int, cfg: CHSBConfig) -> dict:
     n = len(df)
     start = formation_end_idx + 1
     end = min(n, formation_end_idx + 1 + cfg.max_bars_to_breakout)
@@ -304,7 +315,7 @@ def _find_breakout(df: pd.DataFrame, formation_end_idx: int, nl_left: NecklinePo
 
             return {
                 "breakout_idx": i,
-                "breakout_date": df.index[i],
+                "breakout_date": orig_df.index[i],
                 "breakout_price": float(df[price_col].iat[i]),
                 "breakout_level": float(level),
                 "breakout_is_gap": is_gap,
@@ -451,7 +462,7 @@ def _candidate_heads(lows: List[Pivot], cfg: CHSBConfig) -> List[Pivot]:
     return out
 
 
-def _build_pattern_from_shoulder_chain(df: pd.DataFrame, heads: List[Pivot], chain: List[ShoulderPair], cfg: CHSBConfig, force_type: Optional[str] = None) -> Optional[CHSBPattern]:
+def _build_pattern_from_shoulder_chain(df: pd.DataFrame, orig_df: pd.DataFrame, heads: List[Pivot], chain: List[ShoulderPair], cfg: CHSBConfig, force_type: Optional[str] = None) -> Optional[CHSBPattern]:
     pattern_type = force_type or ("multiple_shoulders" if len(chain) >= 1 + cfg.min_extra_shoulder_pairs else None)
     if force_type is None and pattern_type is None: return None
     if force_type == "multiple_heads" and len(chain) < 1: return None
@@ -468,7 +479,7 @@ def _build_pattern_from_shoulder_chain(df: pd.DataFrame, heads: List[Pivot], cha
     nl_left, nl_right = nl
     slope_class = _classify_slope(nl_left, nl_right, cfg)
 
-    bo = _find_breakout(df, formation_end_idx, nl_left, nl_right, slope_class, head_low, innermost.right.idx, cfg)
+    bo = _find_breakout(df, orig_df, formation_end_idx, nl_left, nl_right, slope_class, head_low, innermost.right.idx, cfg)
 
     if bo["breakout_price"] is not None:
         height, target = _measure_rule(nl_left, nl_right, head_low, bo["breakout_price"], head_idx_for_measure)
@@ -529,21 +540,21 @@ def _dedupe_patterns(patterns: List[CHSBPattern]) -> List[CHSBPattern]:
 
 def detect_chsb(df: pd.DataFrame, cfg: Optional[CHSBConfig] = None) -> List[CHSBPattern]:
     if cfg is None: cfg = CHSBConfig()
-    df = df.copy()
-    if not isinstance(df.index, pd.DatetimeIndex):
+    orig_df = df.copy()
+    if not isinstance(orig_df.index, pd.DatetimeIndex):
         raise ValueError("df must be indexed by a DatetimeIndex")
-    df = df.sort_index()
-    df["date_col"] = df.index
-    df = df.reset_index(drop=True)
+    orig_df = orig_df.sort_index()
+    
+    df_indexed = orig_df.reset_index(drop=True)
 
-    pivots = find_pivots(df, cfg.pivot_window)
+    pivots = find_pivots(df_indexed, cfg.pivot_window)
     lows, highs = pivot_lows(pivots), pivot_highs(pivots)
     results: List[CHSBPattern] = []
 
     head_candidates = _candidate_heads(lows, cfg)
     for head in head_candidates:
         for chain, head_idx in _find_multiple_shoulder_patterns(lows, highs, head, cfg):
-            pat = _build_pattern_from_shoulder_chain(df, [head], chain, cfg)
+            pat = _build_pattern_from_shoulder_chain(df_indexed, orig_df, [head], chain, cfg)
             if pat is not None: results.append(pat)
 
     head_clusters = _find_multiple_head_patterns(lows, cfg, head_candidates=head_candidates)
@@ -561,14 +572,14 @@ def detect_chsb(df: pd.DataFrame, cfg: Optional[CHSBConfig] = None) -> List[CHSB
         sp.time_asymmetry_pct = _time_asymmetry(int(np.mean([left_idx, right_idx])), L.idx, R.idx)
         if sp.time_asymmetry_pct > cfg.max_shoulder_time_asymmetry_pct: continue
 
-        pat = _build_pattern_from_shoulder_chain(df, cluster_sorted, [sp], cfg, force_type="multiple_heads")
+        pat = _build_pattern_from_shoulder_chain(df_indexed, orig_df, cluster_sorted, [sp], cfg, force_type="multiple_heads")
         if pat is not None: results.append(pat)
 
     return _dedupe_patterns(results)
 
 
 # ======================================================================
-# 9. BACKTESTING MAIN SCRIPT
+# 9. BACKTESTING MAIN SCRIPT (1 YEAR WITH NON-OVERLAPPING TRADES RULE)
 # ======================================================================
 
 egyptian_stocks = [
@@ -605,13 +616,13 @@ egyptian_stocks = [
     "ZMID.CA",
 ]
 
-# الفحص لآخر سنة واحدة فقط
 end_date = datetime.now()
-start_date = end_date - timedelta(days=365)
+start_date = end_date - timedelta(days=1 * 365)
 
-print(f"🚀 بدء تنفيذ الباك تست للفترة من {start_date.strftime('%Y-%m-%d')} إلى {end_date.strftime('%Y-%m-%d')}...")
+print(f"🚀 بدء تنفيذ الباك تست للفترة من {start_date.strftime('%Y-%m-%d')} إلى {end_date.strftime('%Y-%m-%d')} (سنة واحدة)...")
 
 all_trades = []
+open_trades = []
 config = CHSBConfig()
 
 for idx, ticker in enumerate(egyptian_stocks):
@@ -628,36 +639,34 @@ for idx, ticker in enumerate(egyptian_stocks):
         current_stock_price = float(df['close'].iloc[-1])
         patterns = detect_chsb(df, config)
 
-        for p in patterns:
-            if p.breakout_idx is None or p.breakout_price is None or np.isnan(p.measure_rule_target):
-                continue
+        # ترتيب النماذج زمنياً لحساب تداخل الصفقات بشكل متسلسل
+        valid_patterns = [p for p in patterns if p.breakout_idx is not None and p.breakout_price is not None and not np.isnan(p.measure_rule_target)]
+        valid_patterns.sort(key=lambda x: x.breakout_idx)
 
+        last_trade_exit_date = None
+
+        for trade_idx, p in enumerate(valid_patterns):
             entry_idx = p.breakout_idx
             entry_date = df.index[entry_idx]
+
+            # الشرط 1: إذا كان هناك صفقة قائمة على نفس السهم ولم تنتهِ بعد، نمنع فتح صفقة جديدة
+            if last_trade_exit_date is not None and entry_date <= last_trade_exit_date:
+                continue
+
             entry_price = p.breakout_price
             target_price = p.measure_rule_target
             stop_loss = p.stop_loss
 
-            # منطق حساب المقاومة بعد نسبة 68%
             target_dist = target_price - entry_price
             pct_68_level = entry_price + (0.68 * target_dist)
 
-            pivots_hist = find_pivots(df.iloc[:entry_idx], config.pivot_window)
+            pivots_hist = find_pivots(df.reset_index(drop=True).iloc[:entry_idx], config.pivot_window)
             high_pivots = [pt.price for pt in pivots_hist if pt.kind == "high"]
             resistances_in_zone = [res for res in high_pivots if pct_68_level <= res < target_price]
             
             effective_target = min(resistances_in_zone) if resistances_in_zone else target_price
 
-            # ------------------------------------------------------------------
-            # الشرط الجديد: استبعاد الصفقة إذا كان العائد المتوقع أقل من المخاطرة
-            # ------------------------------------------------------------------
-            potential_reward = effective_target - entry_price
-            potential_risk = entry_price - stop_loss
-
-            if potential_risk <= 0 or potential_reward < potential_risk:
-                continue
-
-            # مدة الصفقات 4 أشهر
+            # الشرط 2: أقصى مدة للصفقة 4 أشهر (120 يوماً) من تاريخ الفتح
             max_exit_date = entry_date + timedelta(days=120)
 
             exit_date = None
@@ -669,44 +678,69 @@ for idx, ticker in enumerate(egyptian_stocks):
                 current_high = df['high'].iloc[i]
                 current_low = df['low'].iloc[i]
 
-                # 1. مهلة الـ 4 أشهر
-                if current_date > max_exit_date:
-                    exit_date = current_date
-                    exit_price = df['close'].iloc[i]
-                    status = "Win" if exit_price > entry_price else "Loss"
-                    break
-
-                # 2. تحقيق الهدف (أو المقاومة)
+                # تحقق الاستهداف أولاً
                 if current_high >= effective_target:
                     exit_date = current_date
                     exit_price = effective_target
-                    status = "Win"
+                    status = "WIN"
                     break
 
-                # 3. ضرب وقف الخسارة
+                # تحقق وقف الخسارة
                 if current_low <= stop_loss:
                     exit_date = current_date
                     exit_price = stop_loss
-                    status = "Loss"
+                    status = "LOSS"
                     break
 
-            # تنسيق الجدول النهائي وفقاً للصورة المطلوبة
-            all_trades.append({
+                # الإغلاق التلقائي بعد مرور 4 أشهر
+                if current_date >= max_exit_date:
+                    exit_date = current_date
+                    exit_price = df['close'].iloc[i]
+                    status = "WIN" if exit_price > entry_price else "LOSS"
+                    break
+
+            # تحديث تاريخ خروج آخر صفقة لمنع التداخل
+            if exit_date is not None:
+                last_trade_exit_date = exit_date
+            else:
+                # إذا كانت الصفقة مفتوحة حتى اليوم، نضع تاريخ الخروج كأقصى مدة (4 أشهر) لمنع فتح صفقات مجدداً
+                last_trade_exit_date = max_exit_date
+
+            trade_info = {
                 "Stock Name": ticker,
                 "Entry Date": entry_date.strftime('%Y-%m-%d'),
                 "Entry Price": round(entry_price, 2),
                 "Target": round(effective_target, 2),
                 "Stop Loss": round(stop_loss, 2),
-                "Exit Date": exit_date.strftime('%Y-%m-%d') if exit_date is not None else None,
+                "Exit Date": exit_date.strftime('%Y-%m-%d') if exit_date is not None else "-",
                 "Current Price": round(current_stock_price, 2),
                 "Status": status
-            })
+            }
+
+            all_trades.append(trade_info)
+
+            if status == "Open":
+                open_trades.append(trade_info)
 
     except Exception as e:
         print(f"❌ خطأ أثناء معالجة السهم {ticker}: {e}")
 
 # ======================================================================
-# 10. EXPORTING RESULTS
+# 10. DISPLAY OPEN TRADES IN TERMINAL
+# ======================================================================
+
+print("\n" + "="*80)
+print("📌 الصفقات المفتوحة (OPEN TRADES):")
+print("="*80)
+if open_trades:
+    for ot in open_trades:
+        print(f"🔹 السهم: {ot['Stock Name']} | تاريخ الدخول: {ot['Entry Date']} | سعر الدخول: {ot['Entry Price']} | الهدف: {ot['Target']} | وقف الخسارة: {ot['Stop Loss']} | السعر الحالي: {ot['Current Price']}")
+else:
+    print("لا توجد صفقات مفتوحة حالياً.")
+print("="*80 + "\n")
+
+# ======================================================================
+# 11. EXPORTING STYLED EXCEL RESULTS
 # ======================================================================
 
 trades_df = pd.DataFrame(all_trades)
@@ -717,9 +751,65 @@ if not trades_df.empty:
     trades_df = trades_df.drop(columns=['Entry Date Temp'])
 
     output_filename = "EGX_CHSB_Backtest_1Year.xlsx"
-    trades_df.to_excel(output_filename, sheet_name='All Trades', index=False)
+    
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "All Trades"
 
-    print(f"\n✅ تم اكتمال الباك تست بنجاح!")
-    print(f"📁 تم حفظ جميع الصفقات في ملف: {output_filename}")
+    headers = ["Stock Name", "Entry Date", "Entry Price", "Target", "Stop Loss", "Exit Date", "Current Price", "Status"]
+    ws.append(headers)
+
+    header_fill = PatternFill(start_color="1B4373", end_color="1B4373", fill_type="solid") # أزرق داكن
+    win_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")       # أخضر فاتح
+    loss_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")      # أحمر/برتقالي فاتح
+    open_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")      # أصفر فاتح
+
+    header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    regular_font = Font(name="Calibri", size=11)
+    
+    thin_border = Border(
+        left=Side(style='thin', color='D9D9D9'),
+        right=Side(style='thin', color='D9D9D9'),
+        top=Side(style='thin', color='D9D9D9'),
+        bottom=Side(style='thin', color='D9D9D9')
+    )
+
+    for col_idx in range(1, len(headers) + 1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for row_idx, row_data in enumerate(trades_df.to_dict('records'), start=2):
+        ws.append([row_data[h] for h in headers])
+        status = row_data["Status"]
+
+        if status == "WIN":
+            row_fill = win_fill
+        elif status == "LOSS":
+            row_fill = loss_fill
+        else:
+            row_fill = open_fill
+
+        for col_idx in range(1, len(headers) + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.fill = row_fill
+            cell.font = regular_font
+            cell.border = thin_border
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+            if headers[col_idx - 1] in ["Entry Price", "Target", "Stop Loss", "Current Price"] and isinstance(cell.value, (int, float)):
+                cell.number_format = '0.00'
+
+    for col in ws.columns:
+        max_len = max(len(str(cell.value or '')) for cell in col)
+        col_letter = get_column_letter(col[0].column)
+        ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
+
+    ws.freeze_panes = 'A2'
+    wb.save(output_filename)
+
+    print(f"✅ تم اكتمال الباك تست بنجاح!")
+    print(f"📁 تم حفظ جميع الصفقات بالتنسيق المطلوب في ملف الإكسيل: {output_filename}")
 else:
     print("\n⚠️ لم يتم العثور على أي صفقات مكتملة الشروط خلال الفترة المحددة.")

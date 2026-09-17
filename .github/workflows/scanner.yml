@@ -1,18 +1,9 @@
-name: Up Trend EGX Market Scan & Backtest
+name: Up Trend EGX Market Scan
 
 on:
   schedule:
-    - cron: '0 13 * * 0-4' # تشغيل تلقائي يومي لـ runner.py
-  workflow_dispatch:
-    inputs:
-      run_mode:
-        description: 'اختر نوع التشغيل'
-        required: true
-        default: 'daily_scan'
-        type: choice
-        options:
-          - daily_scan (runner.py)
-          - backtest_10y (backtest_10year_runner.py)
+    - cron: '0 13 * * 0-4' # تشغيل تلقائي من الأحد للخميس الساعة 3 مساءً بتوقيت مصر
+  workflow_dispatch: # إمكانية التشغيل اليدوي
 
 jobs:
   scan:
@@ -33,18 +24,8 @@ jobs:
           pip install TA-Lib-precompiled || pip install ta-lib
           pip install yfinance pandas numpy scipy openpyxl tqdm requests
 
-      # 1. تشغيل الفحص اليومي المعتاد
-      - name: Run Daily Master Scanner
-        if: "${{ github.event_name == 'schedule' || inputs.run_mode == 'daily_scan (runner.py)' }}"
+      - name: Run Master Scanner & Telegram Notifier
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python runner.py
-
-      # 2. تشغيل باك تيست 10 سنوات
-      - name: Run 10-Year Backtest Scanner
-        if: "${{ inputs.run_mode == 'backtest_10y (backtest_10year_runner.py)' }}"
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-         run: python backtest_10y_runner.py
